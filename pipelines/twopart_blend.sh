@@ -63,6 +63,8 @@ ns-train twopart-blend \
     --pipeline.model.obj-pose-opt-enabled "$OBJ_POSE_OPT_ENABLED" \
     --pipeline.model.trainable-weights "$TRAINABLE_WEIGHTS" \
     --pipeline.model.camera-optimizer.mode "$CAMERA_OPTIMIZER_MODE" \
+    --pipeline.model.quaternion-order "${QUATERNION_ORDER:-legacy}" \
+    --pipeline.datamanager.cache-images cpu \
     --pipeline.model.enable-gs-refinement "$ENABLE_GS_REFINEMENT" \
     --pipeline.model.fg-mask-lambda "$FG_MASK_LAMBDA" \
     --pipeline.model.sensor-depth-lambda "$SENSOR_DEPTH_LAMBDA" \

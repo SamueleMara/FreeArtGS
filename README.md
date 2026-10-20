@@ -40,7 +40,95 @@ This repository contains the official implementation of [FreeArtGS: Articulated 
 
 Please follow [docs/install.md](docs/install.md) to set up the environment and required third-party dependencies.
 
+This fork stores its modified Nerfstudio implementation in the `nerfstudio-local`
+branch of the same repository. Clone with submodules to obtain the matching code:
+
+```bash
+git clone --recurse-submodules git@github.com:SamueleMara/FreeArtGS.git
+```
+
+For an existing checkout, run `git submodule sync --recursive` followed by
+`git submodule update --init --recursive` after pulling this fork.
+
 ## Data Preparation
+
+### Local real RGB-D recordings: native format to masks
+
+The local tools convert the native `videos/`, `depth/`, `meta/`, and `data/`
+recording into the standard RGB-D/COLMAP layout, then generate foreground masks.
+Run these commands yourself, in order. The complete format and options are
+documented in [Real recording conversion](docs/real_recording_conversion.md).
+
+Set the recording, a **new output folder**, and the segmentation prompt:
+
+```bash
+REAL_INPUT="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/assets/dataset_fridge_plastic_depth_20261016_163314"
+REAL_OUTPUT="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real/fridge_plastic_20261016_163314_v2"
+MASK_PROMPT="red fridge"
+```
+
+The original `fridge_plastic_20261016_163314` output already exists. The example
+uses `_v2` to keep it intact; choose another unused folder if necessary.
+
+1. Preview the conversion without writing files:
+
+   ```bash
+   python3 -B \
+     /home/samuelemara/FreeArtGS/samuele/convert_real_recording.py \
+     --input "$REAL_INPUT" --output "$REAL_OUTPUT" --dry-run
+   ```
+
+2. Convert RGB/depth and build both COLMAP models (CPU):
+
+   ```bash
+   python3 -B \
+     /home/samuelemara/FreeArtGS/samuele/convert_real_recording.py \
+     --input "$REAL_INPUT" --output "$REAL_OUTPUT"
+   ```
+
+   This writes rectified `rgb/`, registered `depth_npy/` in meters,
+   `depth_png/` in millimeters, camera metadata, `colmap/`, and `colmap_final/`.
+   The initial and final point clouds merge the cameras separately at the first
+   and last selected frames, using 5 mm voxels. Per-camera clouds and merged
+   `points3D.ply` / `points3D_final.ply` are saved under `pointcloud/`.
+   The output folder must not already exist; no source files are changed.
+
+3. Generate masks from the converted RGB (CUDA):
+
+   ```bash
+   /home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+     /home/samuelemara/FreeArtGS/samuele/create_standard_masks.py \
+     --input "$REAL_OUTPUT" --prompt "$MASK_PROMPT"
+   ```
+
+   Change `MASK_PROMPT` to describe the whole object. The required `--prompt`
+   argument controls detection; it is not hardcoded. Masks are written as
+   `mask/cam_NNN/frame_NNNNNN.png`, binary 0/255, at the converted RGB resolution.
+   Matching completed masks are reused. Empty masks are identified in
+   `metadata/mask_generation.json` and produce a nonzero exit status.
+
+To regenerate masks in the **existing** converted dataset, including those
+already generated with the same prompt:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/create_standard_masks.py \
+  --input "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real/fridge_plastic_20261016_163314" \
+  --prompt "red fridge" --overwrite
+```
+
+`--overwrite` replaces masks, so omit it to reuse matching results. Changing a
+previously used prompt or thresholds requires `--overwrite`. Masks must use the
+rectified output RGB, not the native MP4 frames. Calibration retains its original
+`CANDIDATE_NOT_VALIDATED` status; no joint GT is fabricated.
+
+The real converter saves pre-mask COLMAP models in `sparse_unmasked/0` for
+both endpoints. A complete successful mask-generation pass publishes masked
+models to `sparse/0`, using the shared exporter in the Sapien checkout.
+See [masked/unmasked COLMAP commands](docs/real_recording_conversion.md#masked-and-unmasked-colmap-models-initial-and-final)
+for CPU-only updates to existing real and synthetic datasets.
+
+### Official datasets
 
 Download FreeArt-21:
 
@@ -58,6 +146,12 @@ unzip ./data.zip -d .
 ```
 
 ## Quick Start
+
+For the multi-camera datasets already in this workspace, see
+[Joint training with the local datasets](docs/local_datasets.md) to train each
+object using all eight calibrated cameras in one shared model.
+The local batch stores results, prepared datasets, converted inputs, configs and
+runtime caches under the SSD target selected by `--outputs-root`.
 
 FreeArtGS is driven by a single YAML config. The example below runs object `100109` from FreeArt-21 with [configs/freeart-21.yaml](configs/freeart-21.yaml).
 

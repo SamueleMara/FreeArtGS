@@ -54,6 +54,9 @@ ns-train splatfacto-depth \
     --pipeline.model.sensor-depth-lambda "$SENSOR_DEPTH_LAMBDA" \
     --pipeline.model.camera-optimizer.trans-l2-penalty "$trans_penalty" \
     --pipeline.model.camera-optimizer.rot-l2-penalty "$rot_penalty" \
+    --pipeline.model.camera-optimizer.mode "${CAMERA_OPTIMIZER_MODE:-SO3xR3}" \
+    --pipeline.model.quaternion-order "${QUATERNION_ORDER:-legacy}" \
+    --pipeline.datamanager.cache-images cpu \
     --vis "$VIS" \
     --specialize-output-dir True \
     --pipeline.model.sh-degree "$SH_DEGREE" \
@@ -83,6 +86,9 @@ ns-train splatfacto-depth \
     --pipeline.model.sensor-depth-lambda "$SENSOR_DEPTH_LAMBDA" \
     --pipeline.model.camera-optimizer.trans-l2-penalty "$trans_penalty" \
     --pipeline.model.camera-optimizer.rot-l2-penalty "$rot_penalty" \
+    --pipeline.model.camera-optimizer.mode "${CAMERA_OPTIMIZER_MODE:-SO3xR3}" \
+    --pipeline.model.quaternion-order "${QUATERNION_ORDER:-legacy}" \
+    --pipeline.datamanager.cache-images cpu \
     --pipeline.model.sh-degree "$SH_DEGREE" \
     --max-num-iterations "$MAX_NUM_ITERATIONS" \
     part-data \

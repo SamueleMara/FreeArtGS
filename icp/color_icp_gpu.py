@@ -745,7 +745,7 @@ def predict_pose_constant_velocity(global_poses, valid_indices):
     return global_poses[prev_idx] @ np.linalg.inv(rel_prev)
 
 
-def write_transforms_json(base_dir, set_idx, poses, cam_K, height, width, valid_mask=None):
+def write_transforms_json(base_dir, set_idx, poses, cam_K, height, width, valid_mask=None, frame_stems=None):
     """Overwrite transforms_{set_idx}.json without preserving legacy fields."""
     fl_x = cam_K[0, 0]
     fl_y = cam_K[1, 1]
@@ -756,13 +756,17 @@ def write_transforms_json(base_dir, set_idx, poses, cam_K, height, width, valid_
     n = len(poses)
     if valid_mask is None:
         valid_mask = [True] * n
+    if frame_stems is None:
+        frame_stems = [f"{i:05d}" for i in range(n)]
+    if len(frame_stems) != n:
+        raise ValueError("Point-cloud poses and RGB frame names must align")
     for i in range(n):
         if i < len(valid_mask) and not valid_mask[i]:
             continue
         frames.append({
-            'file_path': f"images/{i:05d}.png",
-            "mask_path": f"mask_{set_idx}/{i:05d}.png",
-            "depth_path": f"depth/{i:05d}.npz",
+            'file_path': f"images/{frame_stems[i]}.png",
+            "mask_path": f"mask_{set_idx}/{frame_stems[i]}.png",
+            "depth_path": f"depth/{frame_stems[i]}.npz",
             'transform_matrix': poses[i].tolist(),
             "fl_x": fl_x,
             "fl_y": fl_y,
@@ -1199,7 +1203,7 @@ def build_pose_graph(args, point_clouds, tensor_point_clouds=None):
 
 
 
-def process_sequence(base_dir, point_clouds, args, set_idx, cam_K, height, width):
+def process_sequence(base_dir, point_clouds, args, set_idx, cam_K, height, width, frame_stems=None):
     """Refactored logic to process a single sequence of point clouds."""
     num_files = len(point_clouds)
     if num_files == 0:
@@ -1227,6 +1231,7 @@ def process_sequence(base_dir, point_clouds, args, set_idx, cam_K, height, width
     # Save relative transforms and global poses
     np.save(os.path.join(base_dir, f"relative_transforms_{set_idx}.npy"), np.array(transforms))
     np.save(os.path.join(base_dir, f"global_poses_{set_idx}.npy"), np.array(global_poses))
+    np.save(os.path.join(base_dir, f"pose_valid_{set_idx}.npy"), np.array(valid_mask, dtype=bool))
     print(f"Saved 'relative_transforms_{set_idx}.npy' and 'global_poses_{set_idx}.npy'")
     plot_path = os.path.join(base_dir, f"trajectory_vis_{set_idx}.png")
     save_trajectory_plot(global_poses, valid_mask, plot_path, set_idx)
@@ -1242,7 +1247,18 @@ def process_sequence(base_dir, point_clouds, args, set_idx, cam_K, height, width
     print(f"Registered point cloud saved to '{out_ply}'")
     
     # Save transforms.json
-    write_transforms_json(base_dir, set_idx, global_poses, cam_K, height, width, valid_mask=valid_mask)
+    write_transforms_json(base_dir, set_idx, global_poses, cam_K, height, width,
+                          valid_mask=valid_mask, frame_stems=frame_stems)
+
+
+def load_frame_point_clouds(base_dir, set_idx, frame_stems):
+    """Keep an empty slot for invisible parts so ICP indices remain RGB timestamps."""
+    paths = [Path(base_dir) / f"point_clouds_{set_idx}" / f"{stem}.ply" for stem in frame_stems]
+    missing = sum(not path.is_file() for path in paths)
+    if missing:
+        print(f"[Set {set_idx}] {missing} missing/empty part clouds; retaining their timestamp slots")
+    return [o3d.io.read_point_cloud(str(path)) if path.is_file() else o3d.geometry.PointCloud()
+            for path in paths]
 
 
 # ================= Main =================
@@ -1302,10 +1318,6 @@ def main():
 
     # Data
     base_dir = args.dataset_dir
-    pcd0_dir = os.path.join(base_dir, "point_clouds_0")
-    pcd1_dir = os.path.join(base_dir, "point_clouds_1")
-    pcd0_files = sorted(glob(os.path.join(pcd0_dir, "*.ply")))
-    pcd1_files = sorted(glob(os.path.join(pcd1_dir, "*.ply")))
     
     cam_K_path = os.path.join(base_dir, "cam_K.txt")
     cam_K = np.loadtxt(cam_K_path)
@@ -1318,14 +1330,15 @@ def main():
 
     # Load point clouds
     print("Loading point clouds...")
-    point_clouds0 = [o3d.io.read_point_cloud(f) for f in pcd0_files]
-    point_clouds1 = [o3d.io.read_point_cloud(f) for f in pcd1_files]
+    frame_stems = [Path(path).stem for path in img_files]
+    point_clouds0 = load_frame_point_clouds(base_dir, 0, frame_stems)
+    point_clouds1 = load_frame_point_clouds(base_dir, 1, frame_stems)
 
     # Process Set 0
-    process_sequence(base_dir, point_clouds0, args, 0, cam_K, height, width)
+    process_sequence(base_dir, point_clouds0, args, 0, cam_K, height, width, frame_stems)
 
     # Process Set 1
-    process_sequence(base_dir, point_clouds1, args, 1, cam_K, height, width)
+    process_sequence(base_dir, point_clouds1, args, 1, cam_K, height, width, frame_stems)
 
 
 if __name__ == "__main__":

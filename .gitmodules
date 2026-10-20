@@ -1,6 +1,7 @@
 [submodule "reconstruction/nerfstudio"]
 	path = reconstruction/nerfstudio
-	url = git@github.com:TwinAligner/nerfstudio.git
+	url = git@github.com:SamueleMara/FreeArtGS.git
+	branch = nerfstudio-local
 [submodule "reconstruction/nerfacc_nerfstudio"]
 	path = reconstruction/nerfacc_nerfstudio
 	url = git@github.com:TwinAligner/nerfacc.git

@@ -2,6 +2,7 @@ video2art_data/
 # Checkpoints
 checkpoints/
 /datasets/
+/input/
 /datasets*/
 /examples/
 /examples*/

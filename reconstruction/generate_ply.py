@@ -225,6 +225,12 @@ def process_part(dataset_dir: Path,
     P = np.concatenate(all_pts, axis=0)
     C = np.concatenate(all_cols, axis=0)
 
+    if (dataset_dir / "multiview.json").exists():
+        # Repeated static RGB-D samples otherwise initialize splats with zero neighbour distance.
+        _, unique_indices = np.unique(P, axis=0, return_index=True)
+        P, C = P[unique_indices], C[unique_indices]
+        print(f"Unique calibrated seed points: {len(P)}")
+
     # Downsample to cap the number of points.
     if max_points is not None and P.shape[0] > max_points:
         idx = np.random.choice(P.shape[0], size=max_points, replace=False)

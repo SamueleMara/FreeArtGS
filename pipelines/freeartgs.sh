@@ -49,7 +49,7 @@ if [[ -z "$config_path" ]]; then
   exit 1
 fi
 
-helper_cmd=(python utils/pipeline_config.py --config "$config_path")
+helper_cmd=(python utils/pipeline_config.py --config "$config_path" --stage evaluation)
 if [[ -n "$object_name" ]]; then
   helper_cmd+=(--object_name "$object_name")
 fi
@@ -65,13 +65,22 @@ run_tracking() {
 }
 
 run_reconstruction() {
-  bash pipelines/icp.sh --config "$config_path" --object_name "$OBJECT_NAME"
+  multiview_enabled=$(python -c 'import sys, yaml; print(bool((yaml.safe_load(open(sys.argv[1])) or {}).get("multiview", {}).get("enabled", False)))' "$config_path")
+  if [[ "$multiview_enabled" != "True" ]]; then
+    bash pipelines/icp.sh --config "$config_path" --object_name "$OBJECT_NAME"
+  fi
   bash pipelines/train_parts.sh --config "$config_path" --object_name "$OBJECT_NAME"
-  python preprocessing/compare_cam_motion.py --config "$config_path" --object_name "$OBJECT_NAME" --output_dir "$OUTPUT_DIR"
-  motion_part=$(cat "$OUTPUT_DIR/motion_part.txt")
+  if [[ "$multiview_enabled" = "True" ]]; then
+    motion_part=1
+  else
+    python preprocessing/compare_cam_motion.py --config "$config_path" --object_name "$OBJECT_NAME" --output_dir "$OUTPUT_DIR"
+    motion_part=$(cat "$OUTPUT_DIR/motion_part.txt")
+  fi
   bash pipelines/twopart_blend.sh --config "$config_path" --object_name "$OBJECT_NAME" --motion_part "$motion_part"
   bash pipelines/splatfacto_art.sh --config "$config_path" --object_name "$OBJECT_NAME" --motion_part "$motion_part"
-  bash pipelines/evaluate_freeartgs.sh -on "$OBJECT_NAME"
+  if [[ "${ENABLED:-True}" = "True" ]]; then
+    bash pipelines/evaluate_freeartgs.sh -on "$OBJECT_NAME"
+  fi
 }
 
 if [[ "$preprocess_only" = false && "$tracking_only" = false && "$reconstruction_only" = false ]]; then

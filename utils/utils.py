@@ -34,15 +34,29 @@ def load_images(input_dir, append_reversed=True, exclude_boundary=True):
         fx, _, cx = map(float, lines[0].strip().split())
         _, fy, cy = map(float, lines[1].strip().split())
     cam_K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+    if not np.isfinite(cam_K).all() or min(fx, fy) <= 0:
+        raise ValueError(f"Invalid intrinsics in {intrinsics_file}")
 
     print(f"Loading images from {input_dir}...")
     
     # Load RGB images with progress bar
     image_dir = os.path.join(input_dir, "images_ori")
     image_files = sorted([os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('.png', '.jpg'))])
+    image_stems = [os.path.splitext(os.path.basename(f))[0] for f in image_files]
+    if not image_stems or len(set(image_stems)) != len(image_stems):
+        raise ValueError(f"Expected a nonempty sequence with unique frame stems in {image_dir}")
+    for folder, extension in (("depth", ".npz"), ("masks", ".png"), ("features", ".npz")):
+        directory = os.path.join(input_dir, folder)
+        if folder == "features" and not os.path.exists(directory):
+            continue
+        stems = sorted(os.path.splitext(f)[0] for f in os.listdir(directory) if f.endswith(extension))
+        if stems != image_stems:
+            raise ValueError(f"Frame alignment mismatch: {directory} must match {image_dir} exactly")
     rgbs = []
     for image_file in tqdm(image_files, desc="Loading RGB images", unit="image"):
         rgb = cv2.imread(image_file)
+        if rgb is None:
+            raise ValueError(f"Cannot read RGB image: {image_file}")
         rgbs.append(rgb)
 
     # Load depth images with progress bar
@@ -50,7 +64,10 @@ def load_images(input_dir, append_reversed=True, exclude_boundary=True):
     depth_files = sorted([os.path.join(depth_dir, f) for f in os.listdir(depth_dir) if f.endswith(('.npz'))])
     depths = []
     for depth_file in tqdm(depth_files, desc="Loading depth images", unit="depth"):
-        depth = np.load(depth_file)['depth']
+        with np.load(depth_file) as data:
+            depth = data['depth']
+        if depth.shape != rgbs[len(depths)].shape[:2] or not np.isfinite(depth).all() or np.any(depth < 0):
+            raise ValueError(f"Invalid depth shape or values: {depth_file}")
         depths.append(depth)
 
     # Load mask images with progress bar
@@ -59,6 +76,10 @@ def load_images(input_dir, append_reversed=True, exclude_boundary=True):
     masks = []
     for mask_file in tqdm(mask_files, desc="Loading mask images", unit="mask"):
         mask = cv2.imread(mask_file)
+        if mask is None or mask.shape[:2] != rgbs[len(masks)].shape[:2]:
+            raise ValueError(f"Invalid mask shape: {mask_file}")
+        if not np.any((mask[..., 0] > 127) & (depths[len(masks)] > 0)):
+            raise ValueError(f"No valid foreground depth: {mask_file}")
         masks.append(mask)
 
     feature_dir = os.path.join(input_dir, "features")
@@ -66,7 +87,11 @@ def load_images(input_dir, append_reversed=True, exclude_boundary=True):
         feature_files = sorted([os.path.join(feature_dir, f) for f in os.listdir(feature_dir) if f.endswith(('.npz'))])
         features = []
         for feature_file in tqdm(feature_files, desc="Loading feature maps", unit="feature"):
-            feature = torch.from_numpy(np.load(feature_file)['feat']).float()
+            with np.load(feature_file) as data:
+                feature_array = data['feat']
+            if feature_array.ndim != 3 or not np.isfinite(feature_array).all():
+                raise ValueError(f"Invalid features: {feature_file}")
+            feature = torch.from_numpy(feature_array).float()
             features.append(feature)
     else:
         features = None

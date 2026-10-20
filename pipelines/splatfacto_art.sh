@@ -68,6 +68,9 @@ ns-train splatfacto-art \
     --pipeline.model.sensor-depth-lambda "$SENSOR_DEPTH_LAMBDA" \
     --pipeline.model.camera-optimizer.trans-l2-penalty "$trans_penalty" \
     --pipeline.model.camera-optimizer.rot-l2-penalty "$rot_penalty" \
+    --pipeline.model.camera-optimizer.mode "${CAMERA_OPTIMIZER_MODE:-SO3xR3}" \
+    --pipeline.model.quaternion-order "${QUATERNION_ORDER:-legacy}" \
+    --pipeline.datamanager.cache-images cpu \
     --vis "$VIS" \
     --specialize-output-dir True \
     --max-num-iterations "$MAX_NUM_ITERATIONS" \

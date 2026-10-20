@@ -12,7 +12,6 @@ import cv2
 from termcolor import cprint
 import numpy as np 
 import argparse
-from grounded_sam_toolkit import load_model_once, do_grounded_sam
 from utils.pipeline_config import load_pipeline_config, resolve_pipeline_paths, resolve_preprocess, set_arg_defaults
 def extract_frames(args):
     video_path = os.path.join(args.input_dir, "rgb_video.mp4")
@@ -118,6 +117,8 @@ if __name__ == "__main__":
 
     args.object_name = args.input_dir.split("/")[-1]
     args.output_dir = f"{args.output_dir}/{args.object_name}"
+    if Path(args.input_dir).resolve() == Path(args.output_dir).resolve():
+        raise ValueError("Preprocessing input and output must differ; use a separate dataset_root")
     os.makedirs(args.output_dir, exist_ok=True)
 
     if os.path.isdir(os.path.join(args.input_dir, "rgb")):
@@ -150,6 +151,7 @@ if __name__ == "__main__":
     cprint("-"*60, "cyan")
 
     if not args.skip_segment:
+        from grounded_sam_toolkit import load_model_once, do_grounded_sam
         cprint(f"Do segment\nsegment_prompt: {args.segment_prompt}", "green")
         sam2_model_cfg, predictor, model, sam2_checkpoint = load_model_once()
         do_grounded_sam(args, sam2_model_cfg, predictor, model, sam2_checkpoint)

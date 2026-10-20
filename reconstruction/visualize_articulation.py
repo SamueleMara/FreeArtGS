@@ -49,7 +49,10 @@ def read_ply_gaussians(ply_path: Path) -> Tuple[np.ndarray, np.ndarray]:
         raise RuntimeError("PLY missing x/y/z")
     positions = np.stack([x, y, z], axis=-1).astype(np.float32)
 
-    # Try SH DC first
+    if all(name in names for name in ("red", "green", "blue")):
+        colors = np.stack([get_col(name) for name in ("red", "green", "blue")], axis=-1) / 255.0
+        return positions, colors.astype(np.float32)
+    # SH-only exports encode their DC coefficients as radiance.
     f0 = get_col("f_dc_0"); f1 = get_col("f_dc_1"); f2 = get_col("f_dc_2")
     if f0 is not None and f1 is not None and f2 is not None:
         sh_dc = np.stack([f0, f1, f2], axis=-1).astype(np.float32)
@@ -212,7 +215,13 @@ class ArticulationViewer:
             self.weights = np.full((self.points0.shape[0],), base, dtype=np.float32)
         self.part_mask = self.weights >= 0.5
 
-        self._refine_axis_origin()
+        self.gt_axis = self.gt_origin = None
+        axis_report = input_dir / "joint_axis_error.json"
+        if axis_report.exists():
+            report = json.loads(axis_report.read_text())
+            if "gt_axis_in_prediction_frame" in report and "gt_origin_in_prediction_frame" in report:
+                self.gt_axis = np.asarray(report["gt_axis_in_prediction_frame"], dtype=np.float32)
+                self.gt_origin = np.asarray(report["gt_origin_in_prediction_frame"], dtype=np.float32)
         # Save initial values for comparison
         self.axis_init = self.axis.copy()
         self.origin_init = self.origin.copy()
@@ -253,6 +262,12 @@ class ArticulationViewer:
         p0, p1 = self._arrow_endpoints(length)
         radius = max(self.axis_radius_scale * length, length * 0.005)
         self.axis_arrow = self._create_arrow_mesh(p0, p1, radius)
+        self.axis_arrow.paint_uniform_color([1.0, .1, .1])
+        self.gt_arrow = None
+        if self.gt_axis is not None:
+            anchor = self.gt_origin + self.gt_axis * np.dot(self.scene_center - self.gt_origin, self.gt_axis)
+            self.gt_arrow = self._create_arrow_mesh(anchor - .5 * length * self.gt_axis,
+                                                    anchor + .5 * length * self.gt_axis, radius * .5)
 
         # world coordinate frame (origin and axes)
         coord_size = 0.1
@@ -276,25 +291,6 @@ class ArticulationViewer:
                 else:  # should not happen, but keep reference
                     out[key] = torch.as_tensor(val, dtype=torch.float32)
         return out
-
-    def _refine_axis_origin(self) -> None:
-        axis_norm = float(np.linalg.norm(self.axis))
-        if axis_norm < 1e-8 or self.points0.shape[0] == 0:
-            return
-        axis_unit = self.axis / axis_norm
-        pts = self.points0
-        proj = pts @ axis_unit
-        if self.joint_type == "prismatic":
-            perp = pts - np.outer(proj, axis_unit)
-            mean_perp = perp.mean(axis=0)
-            mean_proj = proj.mean()
-            self.origin = (mean_perp + mean_proj * axis_unit).astype(np.float32)
-        elif self.joint_type == "revolute":
-            mean_proj = proj.mean()
-            current_proj = float(self.origin @ axis_unit)
-            delta = (mean_proj - current_proj) * axis_unit
-            self.origin = (self.origin + delta).astype(np.float32)
-        self.axis = axis_unit.astype(np.float32)
 
     def _print_axis_diff(self) -> None:
         """Calculate and print the difference between current axis/origin and initial ones."""
@@ -495,7 +491,7 @@ class ArticulationViewer:
                 colors_all = torch.cat((features_dc[:, None, :], features_rest), dim=1)
                 opacities_all = torch.sigmoid(opacities)
                 scales_all = torch.exp(scales)
-                quats_all = quats / (quats.norm(dim=-1, keepdim=True) + 1e-12)
+                quats_all = quats[..., [3, 0, 1, 2]] / quats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
 
                 # Project and rasterize
                 BLOCK_WIDTH = 16
@@ -574,7 +570,7 @@ class ArticulationViewer:
                 colors_all = torch.cat((features_dc[:, None, :], features_rest), dim=1)
                 opacities_all = torch.sigmoid(opacities)
                 scales_all = torch.exp(scales)
-                quats_all = quats / (quats.norm(dim=-1, keepdim=True) + 1e-12)
+                quats_all = quats[..., [3, 0, 1, 2]] / quats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
 
                 BLOCK_WIDTH = 16
                 background = torch.ones(3, device=device, dtype=torch.float32)
@@ -669,6 +665,7 @@ class ArticulationViewer:
         p0, p1 = self._arrow_endpoints(length)
         radius = max(self.axis_radius_scale * length, length * 0.005)
         self.axis_arrow = self._create_arrow_mesh(p0, p1, radius)
+        self.axis_arrow.paint_uniform_color([1.0, .1, .1])
         vis.add_geometry(self.axis_arrow, reset_bounding_box=False)
         vis.update_geometry(self.axis_arrow)
 
@@ -683,6 +680,8 @@ class ArticulationViewer:
         vis.create_window(window_name="Articulation Viewer", width=1280, height=720)
         vis.add_geometry(self.pcd)
         vis.add_geometry(self.axis_arrow)
+        if self.gt_arrow is not None:
+            vis.add_geometry(self.gt_arrow)
         vis.add_geometry(self.coord_frame)
         vis.add_geometry(self.origin_marker)
 
@@ -936,6 +935,7 @@ class ArticulationViewer:
         unit = "deg" if self.joint_type == "revolute" else "units"
         step = self.step_deg if self.joint_type == "revolute" else self.step_trans
         print(f"Joint type: {self.joint_type}. Step: {step:.4f} {unit}. Axis step: {self.axis_step:.4f}")
+        print("Predicted joint axis: red. Ground-truth joint axis (when available): green.")
         print("Controls: D/d(+), A/a(-), R(reset), M(toggle motion_part), J/K(threshold -/+), S(toggle soft/hard), P(save capture)")
         print("Axis controls: </,(axis back), >./(axis forward), [ (step down), ] (step up)")
         print("Axis sizing: -(thinner), =(thicker), 7(head shorter), 8(head longer), 9(head narrower), 0(head wider)")

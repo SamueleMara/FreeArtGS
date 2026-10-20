@@ -1,0 +1,78 @@
+paths:
+  object_name: episode_000000
+  original_data_dir: /home/samuelemara/FreeArtGS/input
+  dataset_root: datasets
+  output_root: outputs
+split_eval:
+  enabled: false
+preprocess:
+  segment_prompt: object
+  skip_segment: true
+  bg_color: white
+  visualize_features: false
+  feature_model_name: dinov3_vitl16
+  feature_image_size: 720
+  feature_patch_size: 16
+  feature_checkpoint_path: checkpoints/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+  pcd_max_depth: 3.0
+tracking:
+  tracker_config: tracking/configs/alltracker.yaml
+  window_size: 8
+  min_depth: 0.01
+  max_depth: 3.0
+  min_trajectory_count: 500
+  visibility_threshold: 0.7
+  confidence_threshold: 0.7
+  downscale_factor: 2
+  no_pingpong: false
+icp:
+  erode_kernel_size: 3
+  erode_iterations: 1
+  sample_points: 100000
+  local_map_window: 8
+  local_map_max_points: 50000
+  max_frame_translation: 0.2
+  max_frame_rotation_deg: 20.0
+  global_opt: true
+  min_points_per_pcd: 50
+train_parts:
+  enable_frame_filtering: false
+  penalty_scale: 1.0
+  trans_penalty_factor: 0.01
+  rot_penalty_factor: 0.001
+  max_num_iterations: 30000
+  vis: tensorboard
+  fg_mask_lambda: 1.0
+  sensor_depth_lambda: 10.0
+  sh_degree: 0
+twopart_blend:
+  penalty_scale: 1.0
+  trans_penalty_factor: 0.01
+  rot_penalty_factor: 0.001
+  max_num_iterations: 30000
+  vis: tensorboard
+  enable_frame_filtering: false
+  obj_pose_opt_enabled: true
+  trainable_weights: true
+  camera_optimizer_mode: SO3xR3
+  enable_gs_refinement: false
+  fg_mask_lambda: 1.0
+  sensor_depth_lambda: 10.0
+  sh_degree: 0
+  obj_trans_l2_penalty: 0.0
+  obj_rot_l2_penalty: 0.0
+splatfacto_art:
+  enable_refine: true
+  penalty_scale: 1.0
+  trans_penalty_factor: 0.01
+  rot_penalty_factor: 0.001
+  max_num_iterations: 30000
+  vis: tensorboard
+  optimize_joint_axis: true
+  optimize_joint_origin: true
+  optimize_joint_params: true
+  origin_adjustment_weight: 0.0
+  axis_adjustment_weight: 0.0
+  fg_mask_lambda: 1.0
+  sh_degree: 0
+  sensor_depth_lambda: 1.0
