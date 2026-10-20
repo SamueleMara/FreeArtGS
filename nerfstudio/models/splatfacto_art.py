@@ -512,7 +512,7 @@ class SplatfactoArtModel(SplatfactoModel):
             means_concat,  # Gradients flow through here!
             torch.exp(scales_concat),
             1,
-            quats_concat / quats_concat.norm(dim=-1, keepdim=True),
+            self.quats_for_gsplat(quats_concat),
             viewmat.squeeze()[:3, :],
             camera.fx.item(),
             camera.fy.item(),
@@ -672,10 +672,10 @@ class SplatfactoArtModel(SplatfactoModel):
         for idx, _batch in enumerate(cached_train):
             camera = datamanager.train_dataset.cameras[idx : idx + 1].to(self.device)
             outputs = self.get_outputs_for_camera(camera=camera)
-            frame_idx = outputs["frame_idx"]
             rgb = outputs["rgb"].detach().cpu().numpy().clip(0, 1)
             rgb_u8 = (rgb * 255).astype("uint8")
-            Image.fromarray(rgb_u8).save(vis_dir / f"rgb_{frame_idx:05d}.png")
+            image_stem = datamanager.train_dataset.image_filenames[idx].stem
+            Image.fromarray(rgb_u8).save(vis_dir / f"rgb_{image_stem}.png")
     
     def after_train(self, step: int):
         """Aggregate refinement stats from 2N concat to N base gaussians.

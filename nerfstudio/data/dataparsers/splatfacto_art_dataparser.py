@@ -21,6 +21,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     read_camK,
     load_3dgs_ply,
     apply_left_se3_to_gaussians,
+    load_multiview_frames,
 )
 from nerfstudio.utils.rich_utils import CONSOLE
 
@@ -89,6 +90,8 @@ class SplatfactoArtDataParser(DataParser):
         with open(cam_train_path) as f:
             cam_train_data = json.load(f)
         cam_all = list(cam_train_data)
+        multiview = load_multiview_frames(data_dir)
+        view_frames = [multiview[Path(fr["file_path"]).name] for fr in cam_all] if multiview else None
         
         # Load pre-estimated articulation from preprocessing/estimate_joint.py
         est_path = blend_dir / "estimated_joint.json"
@@ -102,8 +105,9 @@ class SplatfactoArtDataParser(DataParser):
         joint_params = [float(x) for x in est.get("joint_params", [])]
         # Verify camera and joint params counts match (if provided)
         if len(joint_params) > 0:
-            assert len(cam_all) == len(joint_params), \
-                f"Camera frames ({len(cam_all)}) != joint_params ({len(joint_params)})"
+            expected = max(fr["time_index"] for fr in view_frames) + 1 if view_frames is not None else len(cam_all)
+            assert expected == len(joint_params), \
+                f"Timestamps ({expected}) != joint_params ({len(joint_params)})"
         CONSOLE.log(f"[green]Loaded joint: type={joint_type}, axis={joint_axis}, origin={joint_origin}")
         if len(joint_params) > 0:
             if joint_type == "revolute":
@@ -234,15 +238,17 @@ class SplatfactoArtDataParser(DataParser):
         # Use GLOBAL indices (not local split indices) for frame_index
         # This ensures eval frames can correctly index into joint_params which is sized based on train split
         cameras = Cameras(
-            fx=torch.full((len(indices),), fx, dtype=torch.float32),
-            fy=torch.full((len(indices),), fy, dtype=torch.float32),
-            cx=torch.full((len(indices),), cx, dtype=torch.float32),
-            cy=torch.full((len(indices),), cy, dtype=torch.float32),
-            height=torch.full((len(indices),), height, dtype=torch.int32),
-            width=torch.full((len(indices),), width, dtype=torch.int32),
+            fx=torch.tensor([view_frames[i]["fl_x"] for i in indices]) if view_frames is not None else fx,
+            fy=torch.tensor([view_frames[i]["fl_y"] for i in indices]) if view_frames is not None else fy,
+            cx=torch.tensor([view_frames[i]["cx"] for i in indices]) if view_frames is not None else cx,
+            cy=torch.tensor([view_frames[i]["cy"] for i in indices]) if view_frames is not None else cy,
+            height=torch.tensor([view_frames[i]["h"] for i in indices]) if view_frames is not None else height,
+            width=torch.tensor([view_frames[i]["w"] for i in indices]) if view_frames is not None else width,
             camera_to_worlds=poses[:, :3, :4],
             camera_type=CameraType.PERSPECTIVE,
-            metadata={"frame_index": torch.tensor(indices, dtype=torch.long).unsqueeze(-1)},
+            metadata={"frame_index": torch.tensor(
+                [view_frames[i]["time_index"] for i in indices] if view_frames is not None else indices,
+                dtype=torch.long).unsqueeze(-1)},
         )
         
         # Scene box

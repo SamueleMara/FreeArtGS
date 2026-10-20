@@ -103,6 +103,8 @@ class SplatfactoModelConfig(ModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: SplatfactoModel)
+    quaternion_order: Literal["legacy", "xyzw"] = "legacy"
+    """Convert internal XYZW rotations to GSplat WXYZ; legacy preserves existing checkpoints."""
     warmup_length: int = 500
     """period of steps where refinement is turned off"""
     refine_every: int = 100
@@ -202,7 +204,7 @@ class SplatfactoModel(Model):
         distances, _ = self.k_nearest_sklearn(means.data, 3)
         distances = torch.from_numpy(distances)
         # find the average of the three nearest neighbors for each point and use that as the scale
-        avg_dist = distances.mean(dim=-1, keepdim=True)
+        avg_dist = distances.mean(dim=-1, keepdim=True).clamp_min(1e-8)
         scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
         num_points = means.shape[0]
         quats = torch.nn.Parameter(random_quat_tensor(num_points))
@@ -220,7 +222,7 @@ class SplatfactoModel(Model):
                 shs[:, 1:, 3:] = 0.0
             else:
                 CONSOLE.log("use color only optimization with sigmoid activation")
-                shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
+                shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-6)
             features_dc = torch.nn.Parameter(shs[:, 0, :])
             features_rest = torch.nn.Parameter(shs[:, 1:, :])
         else:
@@ -290,6 +292,11 @@ class SplatfactoModel(Model):
     @property
     def quats(self):
         return self.gauss_params["quats"]
+
+    def quats_for_gsplat(self, quats):
+        if self.config.quaternion_order == "xyzw":
+            quats = quats[..., [3, 0, 1, 2]]
+        return quats / quats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
     @property
     def features_dc(self):
@@ -561,7 +568,7 @@ class SplatfactoModel(Model):
             torch.exp(self.scales[split_mask].repeat(samps, 1)) * centered_samples
         )  # how these scales are rotated
         quats = self.quats[split_mask] / self.quats[split_mask].norm(dim=-1, keepdim=True)  # normalize them first
-        rots = quat_to_rotmat(quats.repeat(samps, 1))  # how these scales are rotated
+        rots = quat_to_rotmat(self.quats_for_gsplat(quats.repeat(samps, 1)))
         rotated_samples = torch.bmm(rots, scaled_samples[..., None]).squeeze()
         new_means = rotated_samples + self.means[split_mask].repeat(samps, 1)
         # step 2, sample new colors
@@ -754,7 +761,7 @@ class SplatfactoModel(Model):
             means_crop,
             torch.exp(scales_crop),
             1,
-            quats_crop / quats_crop.norm(dim=-1, keepdim=True),
+            self.quats_for_gsplat(quats_crop),
             viewmat.squeeze()[:3, :],
             camera.fx.item(),
             camera.fy.item(),

@@ -195,6 +195,13 @@ class TwoPartBlendModel(SplatfactoModel):
 
         # Base object poses (map mot view to ref view): T_obj = C_ref @ inv(C_mot)
         T_obj_base = C_ref @ T_mot_inv
+        if "time_indices" in self.metadata:
+            time_indices = self.metadata["time_indices"]
+            representatives = [time_indices.index(t) for t in range(max(time_indices) + 1)]
+            shared = T_obj_base[representatives]
+            if not torch.allclose(T_obj_base, shared[time_indices], atol=1e-4, rtol=1e-4):
+                raise ValueError("Calibrated views at the same timestamp must share the initial object pose")
+            T_obj_base = shared
 
         self.register_buffer("_T_obj_base", T_obj_base)
         # First frame can now be optimized through obj_pose_adjustment
@@ -409,7 +416,7 @@ class TwoPartBlendModel(SplatfactoModel):
             means_concat,  # Gradients flow through here!
             torch.exp(scales_concat),
             1,
-            quats_concat / quats_concat.norm(dim=-1, keepdim=True),
+            self.quats_for_gsplat(quats_concat),
             viewmat.squeeze()[:3, :],
             camera.fx.item(),
             camera.fy.item(),

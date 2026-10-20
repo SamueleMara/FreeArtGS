@@ -14,6 +14,7 @@
 """ Data parser utils for nerfstudio datasets. """
 
 import math
+import json
 import os
 from typing import List, Tuple, Any
 from pathlib import Path
@@ -22,6 +23,20 @@ import numpy as np
 from plyfile import PlyElement, PlyData
 import warnings
 warnings.filterwarnings('ignore')
+
+
+def load_multiview_frames(data_dir):
+    path = Path(data_dir) / "multiview.json"
+    if not path.exists():
+        return {}
+    frames = json.loads(path.read_text())["frames"]
+    by_name = {Path(frame["file_path"]).name: frame for frame in frames}
+    if not frames or len(by_name) != len(frames):
+        raise ValueError(f"Multi-view frames must have unique image names: {path}")
+    times = {frame["time_index"] for frame in frames}
+    if times != set(range(max(times) + 1)):
+        raise ValueError(f"Multi-view timestamps must be contiguous starting at zero: {path}")
+    return by_name
 
 
 def get_train_eval_split_fraction(image_filenames: List, train_split_fraction: float, use_all_train_images: bool) -> Tuple[np.ndarray, np.ndarray]:

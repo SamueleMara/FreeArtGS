@@ -21,6 +21,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     read_camK,
     load_3dgs_ply,
     apply_left_se3_to_gaussians,
+    load_multiview_frames,
 )
 from nerfstudio.utils.rich_utils import CONSOLE
 
@@ -152,6 +153,8 @@ class TwoPartBlendDataParser(DataParser):
         frames0_all = _load_all_frames_for_part(cfg.part0_dir)
         frames1_all = _load_all_frames_for_part(cfg.part1_dir)
         C0_aligned, C1_aligned, frames_ref, C0_common_orig, C1_common_orig = _align_two_pose_lists_by_first_frame(frames0_all, frames1_all)
+        multiview = load_multiview_frames(cfg.data)
+        view_frames = [multiview[Path(fr["file_path"]).name] for fr in frames_ref] if multiview else None
 
         # Convert camera poses to OpenGL convention (cv -> gl)
         C0_gl = (C0_aligned @ CV_TO_GL)
@@ -247,6 +250,13 @@ class TwoPartBlendDataParser(DataParser):
         cy_t = torch.full((len(image_filenames),), float(cy) if cy is not None else (height0 / 2.0), dtype=torch.float32)
         height_t = torch.full((len(image_filenames),), int(height0), dtype=torch.int32)
         width_t = torch.full((len(image_filenames),), int(width0), dtype=torch.int32)
+        if view_frames is not None:
+            fx_t = torch.tensor([fr["fl_x"] for fr in view_frames], dtype=torch.float32)
+            fy_t = torch.tensor([fr["fl_y"] for fr in view_frames], dtype=torch.float32)
+            cx_t = torch.tensor([fr["cx"] for fr in view_frames], dtype=torch.float32)
+            cy_t = torch.tensor([fr["cy"] for fr in view_frames], dtype=torch.float32)
+            width_t = torch.tensor([fr["w"] for fr in view_frames], dtype=torch.int32)
+            height_t = torch.tensor([fr["h"] for fr in view_frames], dtype=torch.int32)
         distortion_params = torch.zeros((len(image_filenames), 6), dtype=torch.float32)
 
         # Split indices
@@ -294,6 +304,8 @@ class TwoPartBlendDataParser(DataParser):
         # NOT local indices within this split. This ensures eval frames can correctly
         # index into _T_obj_base which is sized based on all common frames.
         frame_indices = torch.tensor(indices, dtype=torch.long).unsqueeze(-1)
+        if view_frames is not None:
+            frame_indices = torch.tensor([view_frames[i]["time_index"] for i in indices], dtype=torch.long).unsqueeze(-1)
         cam_indices = torch.arange(len(image_filenames), dtype=torch.long)
         cameras = Cameras(
             fx=fx_t,
@@ -318,6 +330,8 @@ class TwoPartBlendDataParser(DataParser):
             "c2w_aligned_part1": c2w1_split,
             "frame_file_paths": frame_paths_split,
         }
+        if view_frames is not None:
+            metadata_extra["time_indices"] = [view_frames[i]["time_index"] for i in indices]
         if self.config.part0_ply is None:
             self.config.part0_ply = cfg.part0_dir / "object_3dgs.ply"
         if self.config.part1_ply is None:
