@@ -185,6 +185,34 @@ subsequent episodes. The fraction can also be supplied to
 This option applies to metric real recordings; synthetic/HoI exporters retain
 their existing sampling. Details: [real point-cloud exports](samuele/DENSE_REAL_COLMAP.md).
 
+### Synthetic dataset FPS metadata
+
+Synthetic scenes record playback rate as `fps` in `metadata/cameras.json` and
+`metadata/timing.json`, and as `fps_resolved` in
+`metadata/job_config_resolved.yaml`. The current datasets use **59.0 FPS**.
+All 328 saved videos across the four 8-camera profiles and the Franka example
+report that rate. The 64- and 100-camera scenes have no saved videos; their rate
+is recorded with `fps_source: provided_video_estimate` rather than claiming a
+per-scene measurement. Timing metadata also records frame interval and count.
+
+To validate and backfill all synthetic scenes, across camera counts and motion
+profiles, without rerendering:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/add_synthetic_fps.py \
+  --root "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output" \
+  --fps 59 --dry-run
+```
+
+Remove `--dry-run` to update metadata. All scenes validate before any writes;
+video rates that disagree with `--fps` are errors. Real and HoI datasets are
+excluded. RGB, depth, point clouds, COLMAP models, and joint trajectories stay
+unchanged. The render-scheduling `fps` field in YAML stays unchanged because
+it cannot be combined with a fixed `num_frames`; `fps_resolved` records the
+playback rate separately. The local Sapien renderer now writes this metadata
+for future exports using its resolved video FPS.
+
 ### Official datasets
 
 Download FreeArt-21:
