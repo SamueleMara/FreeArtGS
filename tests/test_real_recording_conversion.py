@@ -172,6 +172,25 @@ class RealRecordingTests(unittest.TestCase):
             with self.assertRaises(ValueError):converter.main(["--input",str(source),"--output",str(output)])
             self.assertFalse(output.exists())
 
+    def test_fraction_controls_both_unmasked_endpoint_seeds_and_view_plys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = make_source(root); output = root/'fraction'
+            converter.main(['--input',str(source),'--output',str(output),'--size','32','24','--point-fraction','.125'])
+            metadata = json.loads((output/'metadata/real_conversion.json').read_text())
+            self.assertEqual(metadata['point_fraction'], .125)
+            for state in ['start', 'end']:
+                count = 0
+                for name in ['cam_000', 'cam_001']:
+                    depth = np.load(output/f'depth_npy/{name}/frame_{0 if state == "start" else 2:06d}.npy')
+                    expected = int(np.count_nonzero(depth > 0)*.125)
+                    ply = (output/f'pointcloud/views/{state}/{name}.ply').read_text()
+                    self.assertIn(f'element vertex {expected}\n', ply)
+                    count += expected
+                fusion = metadata['endpoint_clouds'][state]
+                self.assertEqual(fusion['point_fraction'], .125)
+                self.assertEqual(fusion['point_stride'], 1)
+                self.assertEqual(fusion['source_points'], count)
+
     def test_multiview_voxel_fusion_averages_geometry_color_and_builds_tracks(self):
         with tempfile.TemporaryDirectory() as temporary:
             output=Path(temporary)

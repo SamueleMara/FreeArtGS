@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
+from point_sampling import point_fraction, sample_pixels
 
 
 def write_json(path, value):
@@ -151,7 +152,7 @@ def write_ply(path, xyz, rgb):
             stream.write(" ".join(map(str, [*position, 0, 0, 0, *color])) + "\n")
 
 
-def merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel_size, state):
+def merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel_size, state, fraction=None):
     """Fuse only cameras at one time; retain one depth observation per view/voxel."""
     xyzs, colors, samples = [], [], []
     camera_by_id = {c["id"]: c for c in cameras}
@@ -159,10 +160,14 @@ def merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel
         camera = camera_by_id[image["camera_id"]]
         depth = np.load(output / "depth_npy" / Path(image["name"]).with_suffix(".npy"), allow_pickle=False)
         rgb = cv2.imread(str(output / "rgb" / image["name"]))[:, :, ::-1]
-        yy, xx = np.mgrid[0:size[1]:stride, 0:size[0]:stride]
+        step = stride if fraction is None else 1
+        yy, xx = np.mgrid[0:size[1]:step, 0:size[0]:step]
         z = depth[yy, xx]
-        valid = z > 0
+        valid = np.isfinite(z) & (z > 0)
         x, y, z = xx[valid], yy[valid], z[valid]
+        if fraction is not None:
+            y, x = sample_pixels(y, x, fraction)
+            z = depth[y, x]
         local = np.column_stack([(x - target_k[0, 2]) / target_k[0, 0] * z,
                                  (y - target_k[1, 2]) / target_k[1, 1] * z, z])
         pose = np.asarray(camera["pose_matrix_4x4"])
@@ -198,6 +203,7 @@ def merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel
             errors.append(float(np.sum((projected[:2] / projected[2] - [u, v]) ** 2)))
         points.append((pid, fused[group], fused_rgb[group].tolist(), float(np.sqrt(np.mean(errors))), tracks))
     return points, dict(source_points=len(xyz), merged_points=len(points), voxel_size_m=voxel_size,
+                        point_fraction=fraction, point_stride=stride if fraction is None else 1,
                         multi_camera_points=sum(len(p[4]) > 1 for p in points), state=state)
 
 
@@ -241,7 +247,7 @@ def write_colmap(output, cameras, images, points, size, target_k, model_name="co
     write_ply(output / "pointcloud" / ply_name, [p[1] for p in points], [p[2] for p in points])
 
 
-def export_final_colmap(output, cameras, frame, size, target_k, stride, voxel_size, calibration_status, source_frame=None):
+def export_final_colmap(output, cameras, frame, size, target_k, stride, voxel_size, calibration_status, source_frame=None, fraction=None):
     if (output / "colmap_final").exists():
         raise FileExistsError(f"Final COLMAP model already exists: {output / 'colmap_final'}")
     images = []
@@ -250,7 +256,7 @@ def export_final_colmap(output, cameras, frame, size, target_k, stride, voxel_si
         quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()[[3, 0, 1, 2]]
         images.append(dict(id=len(images) + 1, camera_id=camera["id"], name=f"{camera['name']}/frame_{frame:06d}.png",
                            q=quaternion, t=pose[:3, 3], observations=[]))
-    points, fusion = merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel_size, "end")
+    points, fusion = merge_endpoint_clouds(output, cameras, images, size, target_k, stride, voxel_size, "end", fraction)
     write_colmap(output, cameras, images, points, size, target_k, "colmap_final", "points3D_final.ply")
     for item in images:
         destination = output / "colmap_final/images" / item["name"]
@@ -278,8 +284,11 @@ def add_final_to_existing(args):
         print(f"Would fuse {len(cameras)} RGB-D clouds at frame {frame} into {output / 'colmap_final'}")
         return
     summary = export_final_colmap(output, cameras, frame, size, np.asarray(metadata["rectified_K"]),
-                                  args.point_stride, args.voxel_size, metadata.get("calibration_status"), metadata["source_frames"][-1])
+                                  args.point_stride, args.voxel_size, metadata.get("calibration_status"), metadata["source_frames"][-1],
+                                  args.point_fraction if args.point_fraction is not None else metadata.get('point_fraction'))
     metadata["final_colmap"] = summary
+    if args.point_fraction is not None:
+        metadata['point_fraction'] = args.point_fraction
     write_json(output / "metadata/real_conversion.json", metadata)
     print(f"Added colmap_final: frame {frame}, {summary['num_points3D']} fused points; RGB/depth/masks unchanged", flush=True)
 
@@ -343,7 +352,7 @@ def convert(args):
         statistics[name] = dict(frames=len(frames), mean_valid_depth_fraction=float(np.mean(coverage)),
                                 rejected_depth_distortion_rays=int((~ray_valid).sum()))
     initial_images = images
-    points, initial_fusion = merge_endpoint_clouds(output, cameras, initial_images, args.size, target_k, args.point_stride, args.voxel_size, "start")
+    points, initial_fusion = merge_endpoint_clouds(output, cameras, initial_images, args.size, target_k, args.point_stride, args.voxel_size, "start", args.point_fraction)
     write_colmap(output, cameras, images, points, args.size, target_k)
     summary = dict(colmap_dir=str(output / "colmap"), sparse_dir=None, sparse_unmasked_dir=str(output / "colmap/sparse_unmasked/0"), masking_pending=True,
                    pointcloud_ply=str(output / "pointcloud/points3D.ply"), endpoint_frame=0, source_frame=frames[0],
@@ -351,7 +360,7 @@ def convert(args):
                    fusion=initial_fusion, calibration_status=calibration.get("status"), part_labels_available=False)
     write_json(output / "metadata/colmap_export.json", summary)
     write_json(output / "colmap/export_summary.json", summary)
-    final_summary = export_final_colmap(output, cameras, len(frames) - 1, args.size, target_k, args.point_stride, args.voxel_size, calibration.get("status"), frames[-1])
+    final_summary = export_final_colmap(output, cameras, len(frames) - 1, args.size, target_k, args.point_stride, args.voxel_size, calibration.get("status"), frames[-1], args.point_fraction)
     write_json(output / "metadata/cameras.json", dict(cameras=cameras, coordinate_frame=calibration["base_frame"], calibration_status=calibration.get("status")))
     for path in (source / "meta").iterdir():
         if path.is_file():
@@ -368,6 +377,7 @@ def convert(args):
                timestamps="source_frame_index / recording FPS; not hardware timestamps", depth_input_unit="uint16 millimeters",
                depth_output_unit="float32 meters, rectified color-camera Z; zero means missing", rectified_K=target_k.tolist(),
                coordinate_frame=calibration["base_frame"], calibration_status=calibration.get("status"), calibration_warning=calibration.get("warning"),
+               point_fraction=args.point_fraction,
                masks_generated=False, joint_gt_available=False, seed_cloud="Unmasked multiview RGB-D fusion; first and last synchronized frames exported separately",
                endpoint_clouds=dict(start=initial_fusion, end=final_summary["fusion"]),
                cameras=statistics))
@@ -391,6 +401,7 @@ def main(argv=None):
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--size", type=int, nargs=2, default=[640, 480], metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--point-stride", type=int, default=8)
+    parser.add_argument("--point-fraction", type=point_fraction, help="Fraction (0, 1] of valid depth pixels per camera; overrides --point-stride, also saved for masked export")
     parser.add_argument("--voxel-size", type=float, default=.005, help="World-space voxel size in meters for multiview endpoint fusion")
     parser.add_argument("--max-frames", type=int, default=0, help="Smoke-test limit per camera; zero means all synchronized frames")
     parser.add_argument("--dry-run", action="store_true")

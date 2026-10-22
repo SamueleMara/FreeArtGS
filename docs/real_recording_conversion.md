@@ -69,7 +69,8 @@ Useful options:
 --max-frames 2        small conversion test in a separate, new output folder
 --size 640 480        output dimensions
 --episode 0           recording episode; this recording contains only episode zero
---point-stride 8      sampling stride for each endpoint camera cloud
+--point-stride 8      legacy unmasked seed grid stride (about 1/64 pixels)
+--point-fraction .125 fraction of valid depth pixels; overrides stride, saved for masked export
 --voxel-size 0.005    world-space voxel size in meters for endpoint fusion
 --final-colmap-only   add the missing final model to an existing converted dataset
 ```
@@ -158,7 +159,7 @@ Each endpoint now has two sparse models:
 
 Both sparse folders contain `cameras`, `images`, and `points3D` in text and
 binary formats by default. The shared `images/` directories retain the original
-RGB images. A 3D point survives if at least one of its recorded observations is
+RGB images. For synthetic/HoI exports, a 3D point survives if at least one of its recorded observations is
 inside its corresponding `mask/<camera>/<frame>.png`. Background observations
 are detached; points without foreground support are removed. Camera poses,
 point coordinates/colors, IDs, and observation indices are preserved. Missing,
@@ -169,14 +170,14 @@ Fresh SAPIEN exports apply this automatically using the rendered masks. Fresh
 real conversion first writes **only `sparse_unmasked/0`**; complete, successful
 mask generation then publishes `sparse/0`. This prevents training from silently
 using unmasked geometry while masks are still missing. The host-side real-data
-mask runner uses this repository's `scripts/mask_colmap_models.py` (default
+mask runner uses the shared COLMAP utilities in `scripts/mask_colmap_models.py` (default
 checkout `/home/samuelemara/Joint3DGS/Sapien`; set `SAPIEN_REPO` if moved).
 
 For **existing outputs**, run the following commands on the host. These perform
-CPU-only filtering of stored models, reconstructing missing synthetic endpoints
+CPU-only rebuilding of real masked RGB-D points or filtering of stored synthetic models, reconstructing missing synthetic endpoints
 from saved RGB-D when requested: no rendering, model inference, or Docker/GPU
-is needed. They preserve RGB/depth/masks and existing PLY files;
-the masked selection is saved in the COLMAP sparse models. Synthetic pre-mask
+is needed. They preserve RGB/depth/masks. Real rebuilds update endpoint PLY files
+to match masked COLMAP; synthetic filtering preserves its existing PLY files. Synthetic pre-mask
 models already exclude actors without articulated-object part labels, so some
 scenes may retain all existing points.
 
@@ -185,8 +186,9 @@ source /home/samuelemara/miniconda3/etc/profile.d/conda.sh
 # Use host Python for CPU conversion/export.
 
 # Existing real recording: both initial and final endpoints.
-python3 -B /home/samuelemara/Joint3DGS/Sapien/scripts/mask_colmap_models.py \
-  --scene "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real/fridge_plastic_20261016_163314"
+python3 -B /home/samuelemara/FreeArtGS/samuele/colmap_masking.py \
+  --scene "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real/fridge_plastic_20261016_163314" \
+  --point-fraction 1
 
 # All 60 PARIS synthetic scenes, using their existing masks and saved RGB-D.
 SAPIEN_OUTPUT="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output"
@@ -200,7 +202,7 @@ done
 ```
 
 `--root` discovers synthetic scenes by `metadata/job_config_resolved.yaml`, so
-real recordings are handled separately. Add `--dry-run` to either command for
+real recordings are handled separately. Add `--dry-run` to the synthetic command for
 read-only validation and point counts. Matching masks must already exist. Endpoint models must exist unless
 `--build-missing-endpoints` is supplied for saved synthetic RGB-D. Failed scenes are reported, other scenes
 are still processed, and the command exits nonzero if any fail.
@@ -210,8 +212,16 @@ The first existing-data run copies the original sparse models into
 edited masks can restore previously excluded points. Initial and final masks
 are validated before publishing either endpoint. Summaries record both point
 counts, the filtering rule, and hashes of all masks used. Do not train or modify
-masks while publishing new sparse models. Existing `pointcloud/*.ply` remain
-pre-mask exports; use `sparse/0/points3D.{txt,bin}` for the filtered points.
+masks while publishing new sparse models. Synthetic `pointcloud/*.ply` remain
+pre-mask exports; use `sparse/0/points3D.{txt,bin}` for their filtered points.
+
+For real recordings, `samuele/colmap_masking.py` reconstructs masked geometry
+from registered metric depth and endpoint poses. `--point-fraction 1` keeps every
+valid foreground pixel; `.125` keeps one eighth per camera. Points are not voxel
+averaged. Initial and final PLYs match their masked models, with separate
+`points3D_unmasked.ply` and `points3D_final_unmasked.ply` for preserved seed models.
+The fraction is saved for future rebuilds. See the [README sampling commands](../README.md#choose-real-rgb-d-point-cloud-and-colmap-downsampling)
+and [export details](../samuele/DENSE_REAL_COLMAP.md).
 
 ### Missing synthetic endpoint models: use saved RGB-D on CPU
 

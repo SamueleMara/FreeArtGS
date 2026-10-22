@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from PIL import Image
 from utils.local_storage import configure_runtime
+from point_sampling import point_fraction
 
 DEFAULT_MODEL_ROOT = Path.home() / "Grounded-SAM-2-autodistill"
 
@@ -77,17 +79,41 @@ def load_segmenter(args):
     dino.load_state_dict(clean_state_dict(torch.load(dino_weights, map_location="cpu")["model"]), strict=False)
     dino = dino.eval().to(args.device)
     predictor = SAM2ImagePredictor(build_sam2("configs/sam2.1/sam2.1_hiera_b+.yaml", str(sam_weights), device=args.device))
+    if getattr(args, "leica_guidance", False):
+        from leica_mask_guidance import LeicaGuidance
+        guidance = LeicaGuidance()
+    else:
+        guidance = None
 
     def segment(path, prompt):
         rgb, tensor = load_image(str(path))
         height, width = rgb.shape[:2]
         combined = np.zeros((height, width), dtype=np.uint8)
+        if guidance is not None:
+            from leica_mask_guidance import large_qr_occluder
+            marker=large_qr_occluder(rgb)
+            if marker is not None:
+                return combined,dict(detections=0,selection_status="excluded_large_qr_occluder",exclude_from_training=True,
+                                     exclusion_reason="A large calibration QR board occludes the acquisition view",qr_polygon=marker)
         with torch.inference_mode():
             boxes, confidence, _ = predict(dino, tensor, prompt, args.box_thr, args.text_thr, device=args.device)
             boxes = boxes.detach().cpu().numpy() * [width, height, width, height]
             xyxy = np.column_stack([boxes[:, :2] - boxes[:, 2:] / 2, boxes[:, :2] + boxes[:, 2:] / 2])
             xyxy[:, [0, 2]] = xyxy[:, [0, 2]].clip(0, width)
             xyxy[:, [1, 3]] = xyxy[:, [1, 3]].clip(0, height)
+            selection = {}
+            if guidance is not None:
+                index, selection = guidance.select(path, xyxy)
+                if selection.get("requires_detector_fallback") and prompt.strip().lower() != "fridge":
+                    fallback, fallback_confidence, _ = predict(dino,tensor,"fridge",args.box_thr,args.text_thr,device=args.device)
+                    extra=fallback.detach().cpu().numpy()*[width,height,width,height]
+                    extra=np.column_stack([extra[:,:2]-extra[:,2:]/2,extra[:,:2]+extra[:,2:]/2])
+                    extra[:,[0,2]]=extra[:,[0,2]].clip(0,width);extra[:,[1,3]]=extra[:,[1,3]].clip(0,height)
+                    xyxy=np.concatenate([xyxy,extra]);confidence=torch.cat([confidence,fallback_confidence])
+                    index,selection=guidance.select(path,xyxy)
+                    selection.update(primary_prompt=prompt,detector_fallback_prompt="fridge")
+                selection["selected_detection_confidence"] = float(confidence[index].item()) if index is not None else None
+                xyxy = xyxy[index:index+1] if index is not None else np.asarray([selection["fallback_box"]]) if "fallback_box" in selection else xyxy[:0]
             autocast = torch.autocast("cuda", dtype=torch.bfloat16) if args.device == "cuda" else contextlib.nullcontext()
             with autocast:
                 if len(xyxy):
@@ -95,10 +121,30 @@ def load_segmenter(args):
                 for box in xyxy:
                     if box[2] <= box[0] or box[3] <= box[1]:
                         continue
-                    masks, scores, _ = predictor.predict(box=box, multimask_output=True)
+                    kwargs = {}
+                    positive = selection.get("sam_positive_points", [])
+                    negative = selection.get("sam_negative_points", [])
+                    positive=[p for p in positive if box[0]<=p[0]<=box[2] and box[1]<=p[1]<=box[3]]
+                    negative=[p for p in negative if box[0]<=p[0]<=box[2] and box[1]<=p[1]<=box[3]]
+                    if selection.get("selection_status")=="leica_box_fallback":
+                        positive=positive[:2]  # Lower static anchors may project onto the foreground acquisition rig.
+                    if guidance is not None:
+                        selection.update(sam_used_positive_points=positive,sam_used_negative_points=negative)
+                    if positive:
+                        kwargs.update(point_coords=np.asarray(positive+negative,dtype=np.float32),
+                                      point_labels=np.asarray([1]*len(positive)+[0]*len(negative),dtype=np.int32))
+                    masks, scores, _ = predictor.predict(box=box, multimask_output=True, **kwargs)
                     if len(scores):
-                        combined |= (masks[int(np.argmax(scores))] > .5).astype(np.uint8) * 255
-        return combined, dict(detections=len(boxes), max_detection_confidence=float(confidence.max().item()) if len(confidence) else None)
+                        ranked=np.array(scores,copy=True)
+                        for mi,candidate in enumerate(masks):
+                            if positive:ranked[mi]+=np.mean([candidate[int(y),int(x)]>.5 for x,y in positive])
+                            if negative:ranked[mi]-=2*np.mean([candidate[int(y),int(x)]>.5 for x,y in negative])
+                        selected=(masks[int(np.argmax(ranked))] > .5).astype(np.uint8)*255
+                        # SAM point prompts can grow onto a foreground rig outside the appliance box.
+                        bounded=np.zeros_like(selected);x0,y0,x1,y1=np.rint(box).astype(int)
+                        bounded[max(0,y0):min(height,y1+1),max(0,x0):min(width,x1+1)]=selected[max(0,y0):min(height,y1+1),max(0,x0):min(width,x1+1)]
+                        combined |= bounded
+        return combined, dict(detections=len(confidence), primary_detections=len(boxes), max_detection_confidence=float(confidence.max().item()) if len(confidence) else None, **selection)
 
     return segment
 
@@ -108,11 +154,19 @@ def generate(args, segment=None):
     frames = list_frames(dataset, args.max_frames)
     settings = dict(prompt=args.prompt.strip(), box_threshold=args.box_thr, text_threshold=args.text_thr,
                     sam_model="sam2.1_hiera_base_plus", model_root=str(args.model_root.expanduser().resolve()))
+    if getattr(args, "leica_guidance", False):
+        settings["leica_guidance"] = "appliance_positive_negative_v5"
+        reference_files = [dataset/"metadata/leica_moving_part.json", dataset/"metadata/leica_appliance_guidance.json"]
+        reference_files.extend(sorted((dataset/"metadata/poses").glob("cam_*.json")))
+        settings["guidance_sha256"] = hashlib.sha256(b"".join(path.read_bytes() for path in reference_files if path.exists())).hexdigest()
     manifest_file = dataset / "metadata/mask_generation.json"
     previous = json.loads(manifest_file.read_text()) if manifest_file.exists() else {}
     if previous and previous.get("settings") != settings and not args.overwrite:
         raise ValueError("Mask settings/prompt changed. Use --overwrite to regenerate masks explicitly")
     print(f"{len(frames)} RGB frames; prompt={settings['prompt']!r}; masks -> {dataset / 'mask'}", flush=True)
+    camera_totals=Counter(path.parent.name for path in frames)
+    camera_completed=Counter()
+    print("Cameras: "+", ".join(f"{name}={count}" for name,count in camera_totals.items()),flush=True)
     if args.dry_run:
         return dict(requested=len(frames))
     for path in [dataset / "mask", manifest_file]:
@@ -158,13 +212,19 @@ def generate(args, segment=None):
         records[str(relative)] = dict(details, rgb_sha256=source_hash, foreground_pixels=count,
                                       foreground_fraction=count / mask.size, status="nonempty" if count else "empty")
         manifest["completed"] += 1
+        camera_completed[path.parent.name] += 1
         manifest["empty"] += count == 0
         write_json(manifest_file, manifest)
         if index % 25 == 0 or index == len(frames) - 1:
-            print(f"{index + 1}/{len(frames)} masks; empty={manifest['empty']}; reused={manifest['skipped']}", flush=True)
-    if not args.max_frames and not manifest["empty"] and all((dataset / model).is_dir() for model in ["colmap", "colmap_final"]):
+            camera=path.parent.name
+            print(f"{camera}: {camera_completed[camera]}/{camera_totals[camera]} masks; total {index + 1}/{len(frames)}; empty={manifest['empty']}; reused={manifest['skipped']}", flush=True)
+    if not args.max_frames and (not manifest["empty"] or getattr(args,"leica_guidance",False)) and all((dataset / model).is_dir() for model in ["colmap", "colmap_final"]):
         from colmap_masking import apply_scene_masks
-        apply_scene_masks(dataset)
+        fraction = getattr(args, 'point_fraction', None)
+        if fraction is None:
+            apply_scene_masks(dataset)
+        else:
+            apply_scene_masks(dataset, fraction=fraction)
     return manifest
 
 
@@ -178,6 +238,8 @@ def main(argv=None):
     parser.add_argument("--text-thr", type=float, default=.25)
     parser.add_argument("--max-frames", type=int, default=0, help="Per-camera limit; zero means all frames")
     parser.add_argument("--overwrite", action="store_true", help="Explicitly replace masks or change the prompt/settings")
+    parser.add_argument("--point-fraction", type=point_fraction, help="Real masked PCD/COLMAP point fraction (0, 1]; default saved setting or 1; does not change masks")
+    parser.add_argument("--leica-guidance", action="store_true", help="HoI!: select the text detection supported by the annotated Leica part projected through the per-frame camera pose")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if not args.prompt.strip() or args.max_frames < 0 or not 0 <= args.box_thr <= 1 or not 0 <= args.text_thr <= 1:

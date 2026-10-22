@@ -83,13 +83,13 @@ uses `_v2` to keep it intact; choose another unused folder if necessary.
    ```bash
    python3 -B \
      /home/samuelemara/FreeArtGS/samuele/convert_real_recording.py \
-     --input "$REAL_INPUT" --output "$REAL_OUTPUT"
+     --input "$REAL_INPUT" --output "$REAL_OUTPUT" --point-fraction 1
    ```
 
    This writes rectified `rgb/`, registered `depth_npy/` in meters,
    `depth_png/` in millimeters, camera metadata, `colmap/`, and `colmap_final/`.
-   The initial and final point clouds merge the cameras separately at the first
-   and last selected frames, using 5 mm voxels. Per-camera clouds and merged
+   The initial and final unmasked seed clouds merge the cameras separately at
+   the first and last selected frames, using 5 mm voxels. Per-camera clouds and merged
    `points3D.ply` / `points3D_final.ply` are saved under `pointcloud/`.
    The output folder must not already exist; no source files are changed.
 
@@ -124,9 +124,66 @@ rectified output RGB, not the native MP4 frames. Calibration retains its origina
 
 The real converter saves pre-mask COLMAP models in `sparse_unmasked/0` for
 both endpoints. A complete successful mask-generation pass publishes masked
-models to `sparse/0`, using the shared exporter in the Sapien checkout.
+models to `sparse/0`. Real masked models are reconstructed directly from saved
+registered depth, RGB, and endpoint poses, without voxel averaging. The shared
+COLMAP utilities require the Sapien checkout at `~/Joint3DGS/Sapien`, or the path
+set in `SAPIEN_REPO`.
 See [masked/unmasked COLMAP commands](docs/real_recording_conversion.md#masked-and-unmasked-colmap-models-initial-and-final)
 for CPU-only updates to existing real and synthetic datasets.
+
+### Choose real RGB-D point-cloud and COLMAP downsampling
+
+`--point-fraction` selects a fraction of valid depth pixels **per camera**, for
+both initial and final endpoints. `1` keeps 100%, `0.25` keeps 25%, and `0.125`
+keeps one eighth. Sampling is deterministic across valid pixels, retaining
+`floor(N * fraction)` points (at least one if a view has valid points).
+An 8-pixel stride in both image dimensions is approximately **1/64**, not 1/8.
+
+For new conversions, the fraction replaces the legacy `--point-stride 8` grid
+sampling. Unmasked seeds still undergo `--voxel-size` fusion (default 5 mm), so
+their merged point count can be smaller. The fraction is saved in metadata and
+used after mask generation. Masked exports sample only valid pixels inside each
+mask, do not voxel-merge, and write matching PLY and COLMAP points.
+
+Rebuild an existing scene using its saved RGB/depth/masks, without running SAM:
+
+```bash
+MASK_PYTHON="/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python"
+REAL_ROOT="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real"
+"$MASK_PYTHON" -B /home/samuelemara/FreeArtGS/samuele/colmap_masking.py \
+  --scene "$REAL_ROOT/fridge_plastic_20261016_163314" --point-fraction 0.125
+
+# Both endpoints of all six newer real scenes:
+for SCENE in "$REAL_ROOT"/*_20261021_161154_episode_00000[0-5]; do
+  "$MASK_PYTHON" -B /home/samuelemara/FreeArtGS/samuele/colmap_masking.py \
+    --scene "$SCENE" --point-fraction 0.125 || break
+done
+```
+
+This replaces masked `colmap/sparse/0`, `colmap_final/sparse/0`, and
+`pointcloud/points3D.ply` / `points3D_final.ply`. Matching PLYs also live inside
+each masked sparse folder. Original unmasked models are preserved, with separate
+`points3D_unmasked.ply` / `points3D_final_unmasked.ply` exports. Existing-scene
+rebuilds leave the seed sampling and `pointcloud/views/` unchanged. Omitting the
+fraction reuses the saved setting, or 1 for older recordings; pass `1` explicitly
+to restore every valid masked depth pixel.
+
+To convert all six native episodes and generate masks with the assigned prompts:
+
+```bash
+"$MASK_PYTHON" -B /home/samuelemara/FreeArtGS/samuele/prepare_real_dataset_batch.py \
+  --input "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/assets/dataset_fridge_plastic_depth_20261021_161154" \
+  --outputs-root "$REAL_ROOT" --point-fraction 0.125 --dry-run
+```
+
+Remove `--dry-run` to process. Add `--overwrite` only when intentionally replacing
+the six existing named scene folders; all selected inputs validate before any
+folder is removed. Episodes 0–2 use `white drawer`, 3 uses `black box`, 4 uses
+`laptop`, and 5 uses `black monitor`. A mask failure is reported and does not skip
+subsequent episodes. The fraction can also be supplied to
+`create_standard_masks.py`; changing it reuses matching masks.
+This option applies to metric real recordings; synthetic/HoI exporters retain
+their existing sampling. Details: [real point-cloud exports](samuele/DENSE_REAL_COLMAP.md).
 
 ### Official datasets
 

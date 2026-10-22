@@ -93,6 +93,15 @@ class StandardMaskTests(unittest.TestCase):
             self.run_generation(None)
             publish.assert_not_called()
 
+    def test_point_fraction_is_forwarded_without_changing_mask_resume_settings(self):
+        for model in ['colmap', 'colmap_final']: (self.root/model).mkdir()
+        segment = lambda path,prompt:(np.full((6,8),255,dtype=np.uint8),dict(detections=1))
+        with patch('colmap_masking.apply_scene_masks') as publish:
+            self.run_generation(segment)
+            self.args.point_fraction = .125
+            self.run_generation(lambda *args: self.fail('Changing point sampling must reuse masks'))
+            publish.assert_called_with(self.root, fraction=.125)
+
     def test_wrong_size_mask_rejected(self):
         with self.assertRaisesRegex(ValueError,'original RGB dimensions'):
             self.run_generation(lambda path,prompt:(np.zeros((3,4),dtype=np.uint8),{}))
