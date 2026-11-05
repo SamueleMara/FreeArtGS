@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from samuele.convert_standard_to_freeart import (
     build_triplets, convert, load_camera_entry, maybe_write_config, parse_args as conversion_args,
+    normalize_frame_intervals, parse_frame_interval, select_triplets,
 )
 from preprocessing.prepare_multiview import calibration_poses, prepare_multiview
 from evaluate.evaluate_local_joint_axis import evaluate_joint_axis, load_gt_axis
@@ -109,6 +110,9 @@ def main():
     parser.add_argument("--iterations", type=int, default=30000, help="Iterations per training stage.")
     parser.add_argument("--max-frames", type=int, help="Limit timestamps per camera for a smoke test.")
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--frame-intervals", nargs="+", type=parse_frame_interval,
+                        help="Inclusive zero-based positions in sorted source frames, e.g. 20:80 120:180. "
+                             "Shared by all cameras/objects; applied before frame-stride and max-frames.")
     parser.add_argument("--dry-run", action="store_true", help="Validate calibration and data without writing or training.")
     parser.add_argument("--evaluate-joint-axis", action="store_true", help="Compare the trained joint axis to GT and report error in degrees.")
     parser.add_argument("--visualize-results", action="store_true",
@@ -117,6 +121,7 @@ def main():
     parser.add_argument("--skip-completed", action="store_true",
                         help="Skip successful jobs with final checkpoint, exports and any requested GT reports/videos present.")
     args = parser.parse_args()
+    args.frame_intervals = normalize_frame_intervals(args.frame_intervals)
     if args.iterations < 1 or args.frame_stride < 1 or (args.max_frames is not None and args.max_frames < 2):
         parser.error("Iterations/stride must be positive and max-frames must be at least two")
     dataset_root = args.datasets.expanduser().resolve()
@@ -147,7 +152,7 @@ def main():
         raise ValueError("The output target must be outside the raw source object folders")
     print(f"All generated data and runtime caches: {outputs_root}", flush=True)
     existing_results = []
-    if (selected_names or args.skip_completed) and (log_root / "summary.json").is_file():
+    if (selected_names or args.skip_completed or args.frame_intervals) and (log_root / "summary.json").is_file():
         existing_results = json.loads((log_root / "summary.json").read_text())
     records = {row["job"]: row for row in existing_results}
     jobs = []
@@ -156,6 +161,8 @@ def main():
         evaluate_axis = args.evaluate_joint_axis or (
             args.visualize_results and (scene / "pointcloud/joint_metadata.json").is_file())
         name = f"{scene.name}_multiview"
+        if args.frame_intervals:
+            name += "_i" + "_".join(f"{start}-{end}" for start, end in args.frame_intervals)
         if args.max_frames is not None or args.frame_stride != 1:
             name += f"_f{args.max_frames or 'all'}_s{args.frame_stride}"
         if args.skip_completed and result_is_complete(records.get(name), outputs_root / name / "splatfacto-art",
@@ -182,10 +189,14 @@ def main():
                        "--frame-stride", str(args.frame_stride), "--dry-run"]
             if args.max_frames is not None:
                 command.extend(["--max-frames", str(args.max_frames)])
+            if args.frame_intervals:
+                command.extend(["--frame-intervals", *[f"{start}:{end}" for start, end in args.frame_intervals]])
             opt = conversion_args(command)
             convert(opt)
             triplets, _ = build_triplets(scene, camera, opt.depth_source, opt.allow_missing_mask)
-            stems = [frame.stem for frame in triplets[::args.frame_stride][:args.max_frames]]
+            stems = [frame.stem for frame in select_triplets(triplets, opt)]
+            if len(stems) < 2:
+                raise ValueError(f"Select at least two timestamps for reconstruction: {scene}, {camera}")
             if source_stems is not None and stems != source_stems:
                 raise ValueError(f"Unsynchronized camera timestamps in {scene}: {camera}")
             source_stems = stems
@@ -221,7 +232,7 @@ def main():
     log_root.mkdir(parents=True, exist_ok=True)
     results = []
     previous_results = []
-    if selected_names or args.skip_completed:
+    if selected_names or args.skip_completed or args.frame_intervals:
         selected_jobs = {name for _, name, _ in jobs}
         previous_results = [row for row in existing_results
                             if row["job"] not in selected_jobs]
@@ -243,7 +254,7 @@ def main():
                     if reuse:
                         meta = json.loads(provenance.read_text())
                         triplets, _ = build_triplets(scene, camera, opt.depth_source, opt.allow_missing_mask)
-                        expected = [frame.stem for frame in triplets[::opt.frame_stride][:opt.max_frames]]
+                        expected = [frame.stem for frame in select_triplets(triplets, opt)]
                         if (Path(meta["scene_root"]).resolve() != scene or meta["selected_camera"] != camera
                                 or [row["source_stem"] for row in meta["frame_map"]] != expected):
                             raise ValueError(f"Prepared tracking does not match selected raw frames: {data}")

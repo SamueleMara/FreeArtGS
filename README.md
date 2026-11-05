@@ -131,6 +131,49 @@ set in `SAPIEN_REPO`.
 See [masked/unmasked COLMAP commands](docs/real_recording_conversion.md#masked-and-unmasked-colmap-models-initial-and-final)
 for CPU-only updates to existing real and synthetic datasets.
 
+### Robot dog masks: distinguish the dog from the manipulator
+
+Text-only prompts `robot dog`, `robotic arm`, and `end effector` can all select
+both robots. Subtracting those masks can erase the entire dog. For this specific
+640×480 fixed-camera recording, use the explicit per-camera SAM2 boxes and
+positive/negative points in `configs/masks/robot_dog_20261022_185923.json`:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/create_standard_masks.py \
+  --input "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real/dog_20261022_185923_episode_000000" \
+  --prompt "robot dog" \
+  --prompt-points /home/samuelemara/FreeArtGS/configs/masks/robot_dog_20261022_185923.json \
+  --device cuda --overwrite
+```
+
+This runs SAM2 directly: the text detector and text-mask subtraction are
+bypassed. The prompt is the object label; the JSON identifies foreground and
+background spatially. Masks must satisfy the supplied point labels, and are
+clipped to the specified object box. The guidance must match every camera's RGB
+resolution. Its hash and applied points are recorded in the mask manifest.
+Changing the guidance requires `--overwrite`. Use different guidance for another
+recording or moving cameras. Inspect masks near contact and occlusion boundaries.
+
+If interrupted, rerun the same command with **`--resume` instead of `--overwrite`**.
+It requires the same prompt/guidance settings, reuses recorded completed masks,
+and regenerates missing or unrecorded leftovers from older runs. It does not
+restart the completed cameras. A failed single-mask prediction is retried using
+alternate SAM candidates, then up to two mask-logit refinements; each accepted
+output must still satisfy every explicit point label after box clipping.
+Unresolved violations stop the run with the camera/frame and offending points,
+instead of silently publishing an invalid mask. The manifest records refinement
+retry counts. Mask generation publishes both masked COLMAP endpoints only after
+the full sequence completes successfully.
+
+For other scenes, `--exclude-prompt "object to remove"` remains available, with
+separate exclusion masks under `mask_excluded/`. It now rejects a subtraction
+that erases a nonempty target, rather than publishing that empty mask. The
+per-frame exclusion detections and removed-pixel counts are recorded in the
+manifest. Explicit point guidance cannot be combined with exclusion prompts or
+Leica guidance. A full successful mask pass rebuilds both masked COLMAP
+endpoints and matching PLYs with the saved point fraction.
+
 ### Choose real RGB-D point-cloud and COLMAP downsampling
 
 `--point-fraction` selects a fraction of valid depth pixels **per camera**, for
@@ -184,6 +227,171 @@ subsequent episodes. The fraction can also be supplied to
 `create_standard_masks.py`; changing it reuses matching masks.
 This option applies to metric real recordings; synthetic/HoI exporters retain
 their existing sampling. Details: [real point-cloud exports](samuele/DENSE_REAL_COLMAP.md).
+
+### Batch preparation of named real recordings
+
+Use `--inputs` for recordings such as `final_black_laptop` or `final_robot_dog`.
+The batch discovers every episode listed in each source's `meta/episodes.jsonl`;
+there is no six-episode limit. Prompts come from the folder name: remove
+`final_`, replace underscores with spaces, and normalize `suitecase` to
+`suitcase`. Source task labels are ignored. This first pass uses text-only SAM
+masking; the old robot-dog spatial configuration is not applied to new captures.
+
+```bash
+ASSETS="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/assets"
+OUTPUTS="/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real"
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/prepare_real_dataset_batch.py \
+  --inputs \
+    "$ASSETS/final_black_laptop" \
+    "$ASSETS/final_matchbox" \
+    "$ASSETS/final_robot_dog" \
+    "$ASSETS/final_black_box" \
+    "$ASSETS/final_light_blue_box" \
+    "$ASSETS/final_orange_suitecase" \
+    "$ASSETS/final_wooden_box" \
+    "$ASSETS/final_red_fridge" \
+  --outputs-root "$OUTPUTS" --point-fraction 1 --resume
+```
+
+Add `--dry-run` to validate without writing. The current eight recordings contain
+110 episodes, all passing RGB-D/calibration preflight. Each output is named
+`<source_folder>_episode_000000`, preserving the source name even when correcting
+a spelling error in the prompt. Conversion uses all calibrated cameras and
+produces initial/final unmasked seeds; successful mask passes publish both masked
+COLMAP endpoints and matching PLYs. Only outputs and runtime caches under the
+chosen output root are written.
+
+`--resume` skips matching completed conversions and reuses recorded masks;
+unrecorded leftovers from interrupted mask runs are regenerated. An incomplete
+conversion is reported for explicit inspection/rebuilding, not deleted. Use
+`--overwrite` instead only to deliberately rebuild the selected scene folders.
+Mask failures do not skip later episodes, and produce a nonzero batch exit code.
+Review empty masks in `metadata/mask_generation.json` and inspect visual quality;
+nonempty masks can still contain the wrong object. Spatial correction profiles
+for these new captures should be prepared separately after that review.
+The legacy single `--input` mode retains the earlier six-episode prompt mapping.
+
+### Correct masks in existing real collections
+
+Reviewed profiles for monitor, matchbox, laptop, robot dog, wooden box, black box,
+and orange suitcase live
+under `configs/masks/`. They select the actual small object rather than the support
+box and use object-specific foreground/background points. Matchbox and basket
+profiles crop the input around the object before SAM2 inference, then restore
+the mask to the original calibrated 640×480 image. A refinement pass keeps the
+valid candidate with the better SAM score; that score is not ground-truth IoU.
+
+The current selection includes 84 newer episodes plus the older monitor,
+laptop, and black-box recordings (87 scenes). This operates on existing standard outputs:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/correct_real_masks.py \
+  --root "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real" \
+  --groups monitor matchbox laptop robot_dog wooden_box black_box orange_suitcase \
+  --overwrite
+```
+
+Add `--dry-run` for scene/profile checks without writing or inference. To continue
+an interrupted correction, replace `--overwrite` with `--resume`; completed masks
+with matching guidance are reused. Limit `--groups` to any subset to correct only
+those objects. A scene failure is reported and other scenes continue. Inspect
+`mask_correction_report.json` under the root for completed/failed scenes.
+
+To correct only black boxes, use `--groups black_box`. This selects the twelve
+`final_black_box_episode_*` scenes and the older
+`black_box_20261021_161154_episode_000003` scene, with separate profiles for
+their different object heights. The profiles reject cardboard supports and
+retain the case body and opening lid using cropped, per-camera spatial prompts.
+The older recording's `cam_001` uses the full image so SAM2 can distinguish
+the robot from the case at contact. To run just this correction:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/correct_real_masks.py \
+  --root "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real" \
+  --groups black_box --overwrite
+```
+
+Black-box validation covers initial, middle, and final frames from all three
+cameras across 13 scenes (117 samples). Point-constraint checks do not establish
+ground-truth segmentation accuracy; small tool-contact boundary errors remain
+possible, and intermediate frames are not exhaustively checked.
+
+To restore the moving telescopic handle and rails on all twelve orange-suitcase
+episodes, use the dedicated profile:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/Joint3DGS/Sapien/samuele/correct_real_masks.py \
+  --root "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real" \
+  --groups orange_suitcase --overwrite
+```
+
+The recording directory is spelled `final_orange_suitecase`; the command group
+and object label use `orange_suitcase` / `orange suitcase`. Bounds include the
+fully extended handle, and foreground anchors at the rail attachments keep
+the silver rails and black grip with the suitcase. Cardboard-support prompts
+exclude the stand. Robot-pose prompts are disabled because the projections
+are inconsistent across these episodes. Small contact-boundary errors are
+still possible; inspect the grip near the robot before training. Validation
+checked five times per camera across all twelve episodes (180 sampled frames);
+it does not cover every frame or measure ground-truth segmentation accuracy.
+
+SAM2 is loaded once on CUDA in the `grounded-sam2` process. Where verified,
+recorded tool poses provide moving background prompts through the saved camera
+calibration. Tool-axis extent is specific to the attachment; the monitor uses
+a shorter extent. Robot-dog and basket profiles use image-space prompts because
+the pose projections were unreliable there. These are segmentation prompts,
+not object pose or joint GT. Validated projected prompts are saved in each
+scene's `metadata/robot_mask_guidance.json`; source-pose/calibration hashes are
+checked before reuse. For uncached poses, an existing Python with `polars` can
+be specified solely for reading the raw Parquet, for example:
+
+```bash
+# Add this argument only if the projected-pose cache is missing or stale:
+--parquet-python /home/samuelemara/miniconda3/envs/yolo26/bin/python
+```
+
+No model runs in that reader environment. The correction replaces masks and
+rebuilds both masked COLMAP endpoints and their matching PLYs. It preserves
+source recordings, converted RGB/depth, and unmasked COLMAP models. Runtime
+files and the correction report remain under the target root.
+
+The original five groups passed 558 sampled frame checks across 62 scenes; not
+every intermediate frame was tested. Before/after overlays and the validation
+report are saved under `mask_correction_previews/`. Inspect occlusion boundaries,
+thin handles, and gripper contacts; passing point constraints does not prove a
+perfect silhouette.
+
+### Export recorded robot positions and calibrated EE/TCP trajectories
+
+Use `samuele/export_real_robot_poses.py` to extract Parquet poses into NumPy
+archives for every converted real episode:
+
+```bash
+/home/samuelemara/miniconda3/envs/grounded-sam2/bin/python -B \
+  /home/samuelemara/FreeArtGS/samuele/export_real_robot_poses.py \
+  --root "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real" \
+  --parquet-python /home/samuelemara/miniconda3/envs/yolo26/bin/python \
+  --calibration-map /home/samuelemara/FreeArtGS/configs/real_robot_pose_calibration.json \
+  --overwrite
+```
+
+Each scene receives `metadata/robot_poses/poses_full.npz` (all Parquet rows),
+`poses_rgbd.npz` (exact RGB-D frame alignment), and `manifest.json` with units,
+source hashes, and pose availability. This is CPU-only. Add `--dry-run` to
+validate without writing and `--overwrite` to replace an existing export.
+
+The measured pose is user-confirmed EE. The supplied calibration map derives
+TCP using EE-local +Z = 0.1876174 m (pointed tip), except the three
+`white_drawer_20261021_161154_episode_00000{0,1,2}` scenes, which use
+0.03487365 m (bare force sensor). Both `ee_position_m` and `tcp_position_m`
+are exported in base coordinates. The implied table Z = -0.019542 m is
+reference metadata and does not shift either trajectory. `--overwrite` replaces
+only the pose exports. See [robot pose export documentation](docs/real_robot_pose_export.md)
+for arrays, calibration assumptions, and custom tool mappings.
 
 ### Synthetic dataset FPS metadata
 

@@ -15,7 +15,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from samuele.convert_standard_to_freeart import camera_intrinsics, convert, load_camera_entry
+from samuele.convert_standard_to_freeart import camera_intrinsics, convert, load_camera_entry, parse_frame_interval
 from pipelines.train_local_datasets import discover_jobs
 from pipelines import train_local_datasets as batch
 from utils.utils import load_images
@@ -55,6 +55,96 @@ class DatasetLoadingTest(unittest.TestCase):
     def run_conversion(self):
         with contextlib.redirect_stdout(io.StringIO()):
             convert(self.args)
+
+    def add_frames(self, count):
+        for i in range(2, count):
+            stem = f"frame_{i:06d}"
+            for folder in ("rgb", "mask"):
+                shutil.copy2(self.scene / folder / "cam_000/frame_000000.png",
+                             self.scene / folder / "cam_000" / f"{stem}.png")
+            np.save(self.scene / "depth_npy/cam_000" / f"{stem}.npy", np.full((6, 8), 4.0 + i, np.float32))
+
+    def test_interval_conversion_unions_before_stride_and_cap(self):
+        self.add_frames(10)
+        self.args.frame_intervals = [(7, 9), (3, 4), (1, 4)]
+        self.args.frame_stride = 2
+        self.args.max_frames = 3
+        self.run_conversion()
+        meta = json.loads((self.args.output / "metadata/freeart_conversion.json").read_text())
+        self.assertEqual(meta["frame_intervals"], [[1, 4], [7, 9]])
+        self.assertEqual([row["source_index"] for row in meta["frame_map"]], [1, 3, 7])
+        self.assertEqual([row["source_stem"] for row in meta["frame_map"]],
+                         ["frame_000001", "frame_000003", "frame_000007"])
+        self.assertEqual([row["output_stem"] for row in meta["frame_map"]], ["00000", "00001", "00002"])
+        for i, value in enumerate([5, 7, 11]):
+            with np.load(self.args.output / f"depth/{i:05d}.npz") as depth:
+                self.assertEqual(float(depth["depth"][0, 0]), value)
+
+    def test_interval_validation_preserves_existing_output(self):
+        for value in ("-1:2", "2:1", "1", "1:2:3", "a:2", "1:"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                parse_frame_interval(value)
+        self.run_conversion()
+        before = (self.args.output / "metadata/freeart_conversion.json").read_bytes()
+        self.args.overwrite = True
+        self.args.frame_intervals = [(0, 2)]
+        with self.assertRaisesRegex(ValueError, "out of range"):
+            self.run_conversion()
+        self.assertEqual((self.args.output / "metadata/freeart_conversion.json").read_bytes(), before)
+
+    def test_interval_batch_does_not_skip_full_sequence_result(self):
+        self.add_second_camera()
+        self.make_completed_result()
+        argv = ["batch", "--datasets", str(self.root), "--iterations", "10",
+                "--frame-intervals", "1:1", "0:0", "0:1", "--skip-completed", "--dry-run"]
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()) as output:
+            batch.main()
+        self.assertIn("scene_multiview_i0-1: 2 cameras", output.getvalue())
+        self.assertIn("1 jobs to run, 0 completed jobs skipped", output.getvalue())
+        self.assertFalse((self.root / "outputs/work").exists())
+
+    def test_interval_batch_requires_two_selected_timestamps(self):
+        self.add_second_camera()
+        with patch.object(sys, "argv", ["batch", "--datasets", str(self.root),
+                                       "--frame-intervals", "1:1", "--dry-run"]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "at least two timestamps"):
+                batch.main()
+        self.assertFalse((self.root / "outputs").exists())
+
+    def test_interval_batch_reuses_only_matching_tracking(self):
+        self.add_frames(4)
+        self.args.frame_intervals = [(1, 1), (3, 3)]
+        datasets = self.make_tracked_multiview()
+        name = "scene_multiview_i1-1_3-3"
+        prepared = self.root / "outputs/work/datasets"
+        prepared.mkdir(parents=True)
+        for camera, data in datasets.items():
+            datasets[camera] = data.rename(prepared / f"{name}_{camera.replace('_', '')}")
+        argv = ["batch", "--datasets", str(self.root), "--object", "scene", "--iterations", "10",
+                "--frame-intervals", "3:3", "1:1", "--reuse-tracking"]
+        with patch.object(sys, "argv", argv), patch("torch.cuda.is_available", return_value=True), \
+             patch.object(batch.subprocess, "run", return_value=subprocess.CompletedProcess(["bash"], 0)) as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            batch.main()
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("--reconstruction_only", run.call_args.args[0])
+        manifest = json.loads((prepared / name / "multiview.json").read_text())
+        self.assertEqual([row["source_stem"] for row in manifest["frames"]],
+                         ["frame_000001", "frame_000001", "frame_000003", "frame_000003"])
+        self.assertEqual([row["time_index"] for row in manifest["frames"]], [0, 0, 1, 1])
+        meta_path = datasets["cam_000"] / "metadata/freeart_conversion.json"
+        meta = json.loads(meta_path.read_text())
+        meta["frame_map"][0]["source_stem"] = "frame_000000"
+        meta_path.write_text(json.dumps(meta))
+        with patch.object(sys, "argv", argv), patch("torch.cuda.is_available", return_value=True), \
+             patch.object(batch.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                batch.main()
+        run.assert_not_called()
+        summary = json.loads((self.root / "outputs/batch_logs/summary.json").read_text())
+        self.assertIn("does not match selected raw frames", summary[0]["error"])
 
     def add_second_camera(self):
         camera = dict(self.camera, name="cam_001")

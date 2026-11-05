@@ -1,0 +1,41 @@
+{
+  "description": "User-confirmed observation.state Cartesian pose is EE in base_link. All existing real recordings use pointed_tip except the three explicitly listed white-drawer episodes, which use bare_force_sensor. Translations are meters along EE-local +Z, with equal EE/TCP orientation.",
+  "calibration_note": "User-supplied contact calibration: bare contact assumed at TCP origin; results are relative to the bare contact point.",
+  "implied_table_z_base_link_m": -0.019542,
+  "table_height_note": "Reference only; no table-height shift is applied to EE or TCP trajectories.",
+  "defaults": {
+    "recorded_frame": "ee",
+    "T_ee_tcp": [
+      [1, 0, 0, 0],
+      [0, 1, 0, 0],
+      [0, 0, 1, 0.1876174],
+      [0, 0, 0, 1]
+    ]
+  },
+  "datasets": {
+    "white_drawer_20261021_161154_episode_000000": {
+      "T_ee_tcp": [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.03487365],
+        [0, 0, 0, 1]
+      ]
+    },
+    "white_drawer_20261021_161154_episode_000001": {
+      "T_ee_tcp": [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.03487365],
+        [0, 0, 0, 1]
+      ]
+    },
+    "white_drawer_20261021_161154_episode_000002": {
+      "T_ee_tcp": [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.03487365],
+        [0, 0, 0, 1]
+      ]
+    }
+  }
+}

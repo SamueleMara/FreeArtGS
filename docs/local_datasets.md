@@ -181,6 +181,57 @@ per training stage:
 bash pipelines/train_local_datasets.sh --object USB_100109 --iterations 10 --max-frames 8 --frame-stride 8
 ```
 
+## Select frame intervals
+
+Use `--frame-intervals START:END [START:END ...]` to reconstruct from one or more
+parts of a recording. Both endpoints are **inclusive, zero-based positions in
+the naturally sorted source frame list**, before subsampling. These are not
+seconds, native recording frame IDs, or the renumbered FreeArtGS output frames.
+For example, if source filenames are `frame_000000`, `frame_000002`,
+`frame_000004`, interval `1:2` selects the latter two files.
+
+```bash
+bash /home/samuelemara/FreeArtGS/pipelines/train_local_datasets.sh \
+  --datasets "/media/samuelemara/Extreme SSD/Samuele/Backup_09_10_26/Sapien/output/real" \
+  --outputs-root "/media/samuelemara/Extreme SSD/Samuele/results_05_11_26/freeart_real" \
+  --object final_red_fridge_episode_000000 \
+  --frame-intervals 20:80 120:180 \
+  --all-cameras --visualize-results --skip-completed
+```
+
+This uses 122 timestamps from every camera in one shared reconstruction. Add
+`--dry-run` to validate the selection without training or writing files.
+
+- Intervals are sorted and overlapping/adjacent intervals are merged. Each
+  timestamp appears once, in chronological order.
+- `--frame-stride` samples the combined selection, starting at its first frame;
+  `--max-frames` then caps that result. For example, intervals `1:4 7:9` with
+  stride 2 and max-frames 3 select source positions `1, 3, 7`.
+- All cameras, and all objects selected in the same command, use the same
+  intervals. Out-of-range endpoints fail rather than being silently clipped;
+  at least two timestamps must remain for multiview training. Use separate
+  commands for different per-object intervals.
+- Selection applies before preprocessing, tracking, ICP and Gaussian training.
+  Saved comparison videos and GT evaluation use the selected timestamps, with
+  source filenames retained for correspondence. Videos play the selected frames
+  consecutively at their configured FPS; omitted time is not restored.
+- Output names include the normalized intervals, e.g.
+  `final_red_fridge_episode_000000_multiview_i20-80_120-180`. Stride/frame caps add
+  the existing `_f..._s...` suffix. Configs, logs, converted inputs and tracking
+  use the same name, keeping interval runs separate from full-sequence runs.
+  `--reuse-tracking` checks the exact selected source filenames.
+- Conversion metadata records the normalized `frame_intervals` and each
+  output frame's original `source_index` and `source_stem`.
+
+Disjoint intervals are concatenated into one shortened sequence. Tracking, ICP
+and temporal regularization treat frames on either side of a gap as neighbors;
+they do not model the omitted elapsed time. Large motion across a gap can degrade
+initialization. Use a continuous interval, or separate reconstruction commands,
+when the selected segments should be independent.
+
+The same option is available in `samuele/convert_standard_to_freeart.py` for
+single-camera conversion. Without it, existing full-sequence behavior is retained.
+
 ## Calibration and motion initialization
 
 Raw datasets contain `rgb/cam_XXX`, `depth_npy/cam_XXX`, `mask/cam_XXX`,

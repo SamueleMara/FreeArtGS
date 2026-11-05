@@ -45,7 +45,17 @@ def check_mask(mask, shape):
     return mask
 
 
+def save_mask(path, mask):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.png.tmp')
+    Image.fromarray(mask).save(temporary, format='PNG')
+    temporary.replace(path)
+
+
 def load_segmenter(args):
+    if getattr(args, 'prompt_points', None):
+        from sam2_point_guidance import load_segmenter as load_guided
+        return load_guided(args)
     root = args.model_root.expanduser().resolve()
     sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / "grounding_dino"))
@@ -151,9 +161,30 @@ def load_segmenter(args):
 
 def generate(args, segment=None):
     dataset = args.input.expanduser().resolve()
+    exclude_prompt = (getattr(args, 'exclude_prompt', None) or '').strip()
+    prompt_points = getattr(args, 'prompt_points', None)
+    if prompt_points and (exclude_prompt or getattr(args, 'leica_guidance', False)):
+        raise ValueError('--prompt-points uses explicit SAM guidance; omit --exclude-prompt and --leica-guidance')
+    if exclude_prompt and getattr(args, 'leica_guidance', False):
+        raise ValueError('Exclusion prompts require unguided text masking; do not combine with --leica-guidance')
     frames = list_frames(dataset, args.max_frames)
     settings = dict(prompt=args.prompt.strip(), box_threshold=args.box_thr, text_threshold=args.text_thr,
                     sam_model="sam2.1_hiera_base_plus", model_root=str(args.model_root.expanduser().resolve()))
+    if exclude_prompt:
+        settings.update(exclude_prompt=exclude_prompt, exclusion_rule='target AND NOT excluded; reject complete target removal v2')
+    if prompt_points:
+        from sam2_point_guidance import read_guidance
+        settings.update(prompt_points_sha256=hashlib.sha256(Path(prompt_points).read_bytes()).hexdigest(),
+                        spatial_guidance='explicit_per_camera_box_points_v1')
+        if json.loads(Path(prompt_points).read_text()).get('robot_state_guidance'):
+            from robot_mask_guidance import guidance_path
+            robot_file=guidance_path(dataset,getattr(args,'robot_guidance_root',None))
+            settings['robot_guidance_sha256']=hashlib.sha256(robot_file.read_bytes()).hexdigest()
+        camera_frames = {}
+        for path in frames:
+            camera_frames.setdefault(path.parent.name, path)
+        for camera, path in camera_frames.items():
+            with Image.open(path) as source: read_guidance(prompt_points,camera,source.size)
     if getattr(args, "leica_guidance", False):
         settings["leica_guidance"] = "appliance_positive_negative_v5"
         reference_files = [dataset/"metadata/leica_moving_part.json", dataset/"metadata/leica_appliance_guidance.json"]
@@ -161,15 +192,20 @@ def generate(args, segment=None):
         settings["guidance_sha256"] = hashlib.sha256(b"".join(path.read_bytes() for path in reference_files if path.exists())).hexdigest()
     manifest_file = dataset / "metadata/mask_generation.json"
     previous = json.loads(manifest_file.read_text()) if manifest_file.exists() else {}
+    resume = getattr(args, 'resume', False)
+    if resume and (args.overwrite or not previous):
+        raise ValueError('--resume requires an existing matching generation manifest and cannot be combined with --overwrite')
     if previous and previous.get("settings") != settings and not args.overwrite:
         raise ValueError("Mask settings/prompt changed. Use --overwrite to regenerate masks explicitly")
     print(f"{len(frames)} RGB frames; prompt={settings['prompt']!r}; masks -> {dataset / 'mask'}", flush=True)
+    if exclude_prompt:
+        print(f'Excluding {exclude_prompt!r}; separate exclusion masks -> {dataset / "mask_excluded"}', flush=True)
     camera_totals=Counter(path.parent.name for path in frames)
     camera_completed=Counter()
     print("Cameras: "+", ".join(f"{name}={count}" for name,count in camera_totals.items()),flush=True)
     if args.dry_run:
         return dict(requested=len(frames))
-    for path in [dataset / "mask", manifest_file]:
+    for path in [dataset / "mask", dataset / 'mask_excluded', manifest_file]:
         if not path.resolve().is_relative_to(dataset):
             raise ValueError(f"Output escapes the dataset: {path}")
     configure_runtime(dataset)
@@ -180,23 +216,29 @@ def generate(args, segment=None):
     for path in frames:
         relative = path.relative_to(dataset / "rgb")
         target = dataset / "mask" / relative
-        if target.exists() and str(relative) not in records and not args.overwrite:
+        if target.exists() and str(relative) not in records and not args.overwrite and not resume:
             raise ValueError(f"Existing mask has no generation record; use --overwrite: {target}")
     manifest = dict(settings=settings, frames=records, requested=len(frames), completed=0, empty=0, skipped=0)
     for index, path in enumerate(frames):
         relative = path.relative_to(dataset / "rgb")
         target = dataset / "mask" / relative
+        excluded_path = dataset / 'mask_excluded' / relative
         if not target.resolve().is_relative_to(dataset):
             raise ValueError(f"Mask output escapes the dataset: {target}")
         source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         with Image.open(path) as image:
             shape = (image.height, image.width)
         old = records.get(str(relative), {})
-        if target.exists() and not args.overwrite:
+        if target.exists() and str(relative) in records and not args.overwrite:
             if old.get("rgb_sha256") != source_hash:
                 raise ValueError(f"RGB changed since masking; use --overwrite: {path}")
             with Image.open(target) as image:
                 mask = check_mask(np.asarray(image), shape)
+            if exclude_prompt:
+                if not excluded_path.resolve().is_relative_to(dataset):
+                    raise ValueError(f'Exclusion mask escapes the dataset: {excluded_path}')
+                if not excluded_path.is_file() or hashlib.sha256(excluded_path.read_bytes()).hexdigest() != old.get('exclusion_sha256'):
+                    raise ValueError(f'Exclusion mask missing or changed; use --overwrite: {excluded_path}')
             details = old
             manifest["skipped"] += 1
         else:
@@ -204,10 +246,21 @@ def generate(args, segment=None):
                 segment = load_segmenter(args)
             mask, details = segment(path, settings["prompt"])
             mask = check_mask(mask, shape)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_suffix(".png.tmp")
-            Image.fromarray(mask).save(temporary, format="PNG")
-            temporary.replace(target)
+            if exclude_prompt:
+                excluded, exclusion_details = segment(path, exclude_prompt)
+                excluded = check_mask(excluded, shape)
+                removed = int(np.count_nonzero((mask > 0) & (excluded > 0)))
+                if removed and removed == int(np.count_nonzero(mask)):
+                    raise ValueError(f'{relative}: exclusion removes the entire target; use spatial --prompt-points guidance instead of another text-only subtraction')
+                mask = np.where(excluded > 0, 0, mask).astype(np.uint8)
+                if not excluded_path.resolve().is_relative_to(dataset):
+                    raise ValueError(f'Exclusion mask output escapes the dataset: {excluded_path}')
+                save_mask(excluded_path, excluded)
+                details = dict(details, exclusion=exclusion_details, removed_pixels=removed,
+                    excluded_pixels=int(np.count_nonzero(excluded)),
+                    exclusion_mask=str(excluded_path.relative_to(dataset)),
+                    exclusion_sha256=hashlib.sha256(excluded_path.read_bytes()).hexdigest())
+            save_mask(target, mask)
         count = int(np.count_nonzero(mask))
         records[str(relative)] = dict(details, rgb_sha256=source_hash, foreground_pixels=count,
                                       foreground_fraction=count / mask.size, status="nonempty" if count else "empty")
@@ -232,18 +285,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="Converted scene containing rgb/cam_NNN/*.png")
     parser.add_argument("--prompt", required=True, help='Object description, e.g. "red fridge" or "refrigerator"')
+    parser.add_argument("--exclude-prompt", help='Segment separately and subtract from the target, e.g. "robotic arm"; saves masks in mask_excluded/')
+    parser.add_argument('--prompt-points',type=Path,help='JSON with per-camera boxes and positive/negative pixel points; uses SAM2 directly without ambiguous text detections')
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("--box-thr", type=float, default=.25)
     parser.add_argument("--text-thr", type=float, default=.25)
     parser.add_argument("--max-frames", type=int, default=0, help="Per-camera limit; zero means all frames")
     parser.add_argument("--overwrite", action="store_true", help="Explicitly replace masks or change the prompt/settings")
+    parser.add_argument('--resume',action='store_true',help='Resume a matching manifest: reuse recorded masks and regenerate missing or unrecorded masks from interrupted runs')
     parser.add_argument("--point-fraction", type=point_fraction, help="Real masked PCD/COLMAP point fraction (0, 1]; default saved setting or 1; does not change masks")
     parser.add_argument("--leica-guidance", action="store_true", help="HoI!: select the text detection supported by the annotated Leica part projected through the per-frame camera pose")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if not args.prompt.strip() or args.max_frames < 0 or not 0 <= args.box_thr <= 1 or not 0 <= args.text_thr <= 1:
         parser.error("Prompt must be nonempty, frame limit nonnegative, and thresholds in [0, 1]")
+    if args.exclude_prompt is not None and not args.exclude_prompt.strip():
+        parser.error('Exclusion prompt must be nonempty')
     result = generate(args)
     if result.get("empty", 0):
         print(f"WARNING: {result['empty']} empty masks; inspect metadata/mask_generation.json and adjust the prompt if needed", file=sys.stderr)

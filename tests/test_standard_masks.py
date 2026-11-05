@@ -107,5 +107,63 @@ class StandardMaskTests(unittest.TestCase):
             self.run_generation(lambda path,prompt:(np.zeros((3,4),dtype=np.uint8),{}))
         self.assertFalse(list((self.root/'mask').rglob('*.png')))
 
+    def test_exclusion_subtracts_only_overlap_and_saves_separate_masks(self):
+        self.args.prompt='robot dog';self.args.exclude_prompt='robotic arm'
+        seen=[]
+        def segment(path,prompt):
+            seen.append(prompt)
+            mask=np.zeros((6,8),dtype=np.uint8)
+            if prompt=='robot dog':mask[1:5,1:6]=255
+            else:mask[0:3,3:8]=255
+            return mask,dict(detections=1)
+        report=self.run_generation(segment)
+        self.assertEqual(seen,['robot dog','robotic arm']*6)
+        for path in (self.root/'mask').rglob('*.png'):
+            mask=np.array(Image.open(path));expected=np.zeros((6,8),dtype=np.uint8)
+            expected[1:5,1:6]=255;expected[0:3,3:8]=0
+            np.testing.assert_array_equal(mask,expected)
+            excluded=self.root/'mask_excluded'/path.relative_to(self.root/'mask')
+            self.assertEqual(np.count_nonzero(np.array(Image.open(excluded))),15)
+        self.assertTrue(all(r['removed_pixels']==6 for r in report['frames'].values()))
+        with patch.object(masker,'load_segmenter',side_effect=AssertionError('Must reuse masks')):
+            self.assertEqual(self.run_generation(None)['skipped'],6)
+        self.args.exclude_prompt='gripper'
+        with self.assertRaisesRegex(ValueError,'settings/prompt changed'):self.run_generation(segment)
+
+    def test_exclusion_missing_detection_keeps_target_and_changed_audit_mask_is_rejected(self):
+        self.args.exclude_prompt='robotic arm'
+        def segment(path,prompt):
+            return (np.zeros((6,8),dtype=np.uint8) if prompt=='robotic arm' else np.full((6,8),255,dtype=np.uint8)),dict(detections=0)
+        report=self.run_generation(segment)
+        self.assertTrue(all(r['removed_pixels']==0 and r['foreground_pixels']==48 for r in report['frames'].values()))
+        next((self.root/'mask_excluded').rglob('*.png')).unlink()
+        with self.assertRaisesRegex(ValueError,'Exclusion mask missing or changed'):self.run_generation(None)
+
+    def test_complete_target_subtraction_is_rejected_before_writing_mask(self):
+        self.args.exclude_prompt='end effector'
+        with self.assertRaisesRegex(ValueError,'exclusion removes the entire target'):
+            self.run_generation(lambda *args:(np.full((6,8),255,dtype=np.uint8),dict(detections=1)))
+        self.assertFalse(list((self.root/'mask').rglob('*.png')))
+
+    def test_resume_reuses_recorded_frames_and_replaces_stale_unrecorded_masks(self):
+        segment=lambda *args:(np.full((6,8),255,dtype=np.uint8),dict(detections=1))
+        self.args.overwrite=True
+        calls=0
+        def interrupted(*args):
+            nonlocal calls
+            calls+=1
+            if calls==3:raise RuntimeError('interrupted')
+            return segment(*args)
+        stale=self.root/'mask/cam_001/frame_000004.png'
+        stale.parent.mkdir(parents=True);Image.fromarray(np.zeros((6,8),dtype=np.uint8)).save(stale)
+        with self.assertRaisesRegex(RuntimeError,'interrupted'):self.run_generation(interrupted)
+        completed=self.root/'mask/cam_000/frame_000000.png'
+        before=completed.stat().st_mtime_ns
+        self.args.overwrite=False;self.args.resume=True
+        with patch.object(masker,'load_segmenter',return_value=segment):report=self.run_generation(None)
+        self.assertEqual(report['skipped'],2)
+        self.assertEqual(completed.stat().st_mtime_ns,before)
+        self.assertEqual(np.count_nonzero(np.array(Image.open(stale))),48)
+
 
 if __name__ == '__main__':unittest.main()

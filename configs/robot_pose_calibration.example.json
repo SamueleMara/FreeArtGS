@@ -1,0 +1,17 @@
+{
+  "description": "Fill recorded_frame with ee or tcp only after checking the acquisition convention. Fill T_ee_tcp with a calibrated 4x4 transform (translation in meters), or leave null when unavailable. No mask-guidance offsets are used.",
+  "defaults": {
+    "recorded_frame": "unknown"
+  },
+  "datasets": {
+    "final_black_laptop": { "T_ee_tcp": null },
+    "final_matchbox": { "T_ee_tcp": null },
+    "final_robot_dog": { "T_ee_tcp": null },
+    "final_black_box": { "T_ee_tcp": null },
+    "final_light_blue_box": { "T_ee_tcp": null },
+    "final_orange_suitecase": { "T_ee_tcp": null },
+    "final_wooden_box": { "T_ee_tcp": null },
+    "final_red_fridge": { "T_ee_tcp": null },
+    "black_monitor_20261021_161154": { "T_ee_tcp": null }
+  }
+}

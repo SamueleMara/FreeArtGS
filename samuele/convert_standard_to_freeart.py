@@ -69,6 +69,38 @@ class FrameTriplet:
     mask_path: Path | None
 
 
+def parse_frame_interval(value: str) -> tuple[int, int]:
+    if not re.fullmatch(r"\d+:\d+", value):
+        raise argparse.ArgumentTypeError("Use START:END with non-negative inclusive frame indices")
+    start, end = map(int, value.split(":"))
+    if start > end:
+        raise argparse.ArgumentTypeError("Frame interval START must not exceed END")
+    return start, end
+
+
+def normalize_frame_intervals(intervals):
+    """Canonical chronological union, so equivalent selections share output names."""
+    merged = []
+    for start, end in sorted(intervals or []):
+        if start < 0 or end < start:
+            raise ValueError("Frame intervals require 0 <= START <= END")
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def select_triplets(triplets, args):
+    intervals = normalize_frame_intervals(getattr(args, "frame_intervals", None))
+    if intervals:
+        if intervals[-1][1] >= len(triplets):
+            raise ValueError(f"Frame interval end {intervals[-1][1]} is out of range; "
+                             f"available frame indices are 0:{len(triplets) - 1}")
+        triplets = [frame for start, end in intervals for frame in triplets[start:end + 1]]
+    return triplets[::args.frame_stride][:args.max_frames]
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert one selected camera from a multi-camera standard dataset to FreeArtGS format."
@@ -107,7 +139,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--frame-stride",
         type=int,
         default=1,
-        help="Keep every Nth matched frame.",
+        help="Keep every Nth frame after combining frame intervals.",
+    )
+    parser.add_argument(
+        "--frame-intervals", nargs="+", type=parse_frame_interval,
+        help="Inclusive zero-based positions in the naturally sorted source frames, e.g. 20:80 120:180. "
+             "Union is taken before frame-stride and max-frames; default: all frames.",
     )
     parser.add_argument(
         "--max-frames",
@@ -498,11 +535,10 @@ def convert(args: argparse.Namespace) -> None:
         camera = str(camera_entry["name"])
 
         triplets, depth_dir = build_triplets(scene_root, camera, args.depth_source, args.allow_missing_mask)
-        triplets = triplets[:: args.frame_stride]
-        if args.max_frames is not None:
-            triplets = triplets[: args.max_frames]
+        source_indices = {frame.stem: i for i, frame in enumerate(triplets)}
+        triplets = select_triplets(triplets, args)
         if not triplets:
-            raise RuntimeError("No frames left after applying --frame-stride/--max-frames.")
+            raise RuntimeError("No frames left after applying frame intervals/stride/max-frames.")
 
         out_root = args.output.expanduser().resolve()
         if out_root == scene_root or out_root in scene_root.parents:
@@ -563,6 +599,8 @@ def convert(args: argparse.Namespace) -> None:
             "num_frames": len(triplets),
             "frame_stride": args.frame_stride,
             "max_frames": args.max_frames,
+            "frame_intervals": normalize_frame_intervals(getattr(args, "frame_intervals", None)),
+            "frame_interval_indexing": "zero-based positions in naturally sorted source frames; inclusive ends",
             "output_format": {
                 "rgb": "rgb/<index>.png" if args.rgb_format == "png" else "rgb/<index>.<source_ext>",
                 "depth": "depth/<index>.npz with key 'depth' in meters",
@@ -598,6 +636,7 @@ def convert(args: argparse.Namespace) -> None:
                 {
                     "output_stem": out_stem,
                     "source_stem": tr.stem,
+                    "source_index": source_indices[tr.stem],
                     "rgb": str(tr.rgb_path),
                     "depth": str(tr.depth_path),
                     "mask": str(tr.mask_path) if tr.mask_path else None,
