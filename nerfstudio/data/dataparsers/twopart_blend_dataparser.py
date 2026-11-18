@@ -137,6 +137,31 @@ class TwoPartBlendDataParserConfig(DataParserConfig):
     """Whether to center the poses."""
     auto_scale_poses: bool = True
     """Whether to automatically scale the poses to fit in +/- 1 bounding box."""
+    joint_aware: bool = False
+    """ForceArtGS joint-aware mode: object poses for every acquisition time come from the dataset's
+    joint_authority (exact A(q_t)), including times without a training image; no world normalisation."""
+
+
+def _joint_aware_object_poses(data_dir: Path, N: np.ndarray) -> np.ndarray:
+    """A_B(t) = N A_W(q_t) N^-1 for every time index, from <data>/joint_authority (read-only)."""
+    meta = json.loads((data_dir / "joint_authority" / "authority.json").read_text())
+    t0 = json.loads((data_dir / "transforms_0.json").read_text())
+    if meta["authority_id"] != t0.get("authority_id"):
+        raise RuntimeError("dataset joint_authority does not match the dataset transforms")
+    q = np.load(data_dir / "joint_authority" / "joint_states.npz")["q"].astype(np.float64)
+    A = np.repeat(np.eye(4)[None], len(q), 0)
+    if meta["joint_type"] != "static":
+        u = np.asarray(meta["axis_world"], np.float64)
+        if meta["joint_type"] == "revolute":
+            o = np.asarray(meta["origin_world"], np.float64)
+            K = np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
+            for t, qt in enumerate(q):
+                R = np.eye(3) + np.sin(qt) * K + (1 - np.cos(qt)) * K @ K
+                A[t, :3, :3] = R
+                A[t, :3, 3] = o - R @ o
+        else:
+            A[:, :3, 3] = q[:, None] * u[None]
+    return (N[None] @ A @ np.linalg.inv(N)[None]).astype(np.float32)
 
 
 @dataclass
@@ -321,7 +346,15 @@ class TwoPartBlendDataParser(DataParser):
         )
 
         # Optionally precompute fused gaussians from PLYs using aligned poses and save to disk
+        joint_aware_extra = {}
+        if cfg.joint_aware:
+            if (cfg.orientation_method != "none" or cfg.center_poses or cfg.auto_scale_poses or cfg.scale_factor != 1.0
+                    or cfg.motion_part != 1):
+                raise RuntimeError("joint-aware blending needs motion_part 1, orientation none, no centring/auto-scale")
+            joint_aware_extra["joint_aware_object_poses"] = _joint_aware_object_poses(
+                cfg.data, np.linalg.inv(C0_common_orig[0]).astype(np.float64))
         metadata_extra = {
+            **joint_aware_extra,
             "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
             "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
             "mask_color": self.config.mask_color,

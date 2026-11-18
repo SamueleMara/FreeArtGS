@@ -93,6 +93,9 @@ class PartDataParserConfig(DataParserConfig):
     """Whether to not resume c2w. For well calibrated objects."""
     part_id: int = 0
     """The part id to reconstruct."""
+    joint_aware: bool = False
+    """ForceArtGS joint-aware mode: every frame must carry ``supervision_path`` (silhouette-validity mask);
+    unknown / other-part pixels then give neither positive nor negative part supervision."""
 @dataclass
 class PartDataParser(DataParser):
     """PartDataParser DatasetParser"""
@@ -113,6 +116,7 @@ class PartDataParser(DataParser):
         image_filenames = []
         mask_filenames = []
         depth_filenames = []
+        supervision_filenames = []
         poses = []
         num_skipped_image_filenames = 0
 
@@ -206,6 +210,11 @@ class PartDataParser(DataParser):
             )
             if self.config.part_id is not None:
                 mask_fname = Path(str(mask_fname).replace("masks", f"mask_{self.config.part_id:01d}"))
+            if self.config.joint_aware:
+                sup = data_dir / frame["supervision_path"] if "supervision_path" in frame else None
+                if sup is None or not sup.exists():
+                    raise RuntimeError(f"joint-aware part data needs supervision_path for {frame['file_path']}")
+                supervision_filenames.append(sup)
             if mask_fname.exists():
                 mask_filenames.append(mask_fname)
 
@@ -305,8 +314,15 @@ class PartDataParser(DataParser):
         poses[:, :3, 3] *= scale_factor
 
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
+        if self.config.joint_aware and (len(supervision_filenames) != len(image_filenames)
+                                        or len(mask_filenames) != len(image_filenames)):
+            raise RuntimeError("joint-aware part data needs one part mask and one supervision mask per image")
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
+        if self.config.joint_aware:
+            if len(mask_filenames) != len(indices):
+                raise RuntimeError("joint-aware part data needs one part mask and one supervision mask per image")
+            supervision_filenames = [supervision_filenames[i] for i in indices]
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
@@ -554,6 +570,7 @@ class PartDataParser(DataParser):
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
                 "mask_color": self.config.mask_color,
+                **({"supervision_filenames": supervision_filenames, "joint_aware": True} if self.config.joint_aware else {}),
                 **metadata,
             },
         )

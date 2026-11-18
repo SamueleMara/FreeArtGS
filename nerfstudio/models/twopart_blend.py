@@ -47,6 +47,9 @@ class TwoPartBlendModelConfig(SplatfactoModelConfig):
     
     # Object pose optimization
     obj_pose_opt_enabled: bool = True
+    joint_aware: bool = False
+    """ForceArtGS joint-aware mode: object poses are exactly the authority's A(t) carried by the virtual cameras;
+    any free per-time SE(3) adjustment is a configuration error."""
     """Enable learnable object pose adjustments"""
     
     obj_trans_l2_penalty: float = 0.0
@@ -176,6 +179,8 @@ class TwoPartBlendModel(SplatfactoModel):
         )
     
     def _init_object_poses(self, device: str):
+        if self.config.joint_aware and (self.config.obj_pose_opt_enabled or self.motion_part != 1):
+            raise ValueError("joint-aware blending forbids obj_pose_opt_enabled and requires motion_part == 1")
         """Initialize object poses and learnable adjustments"""
         # Compute base object poses: T_obj = C_ref @ inv(C_mot)
                     
@@ -195,7 +200,16 @@ class TwoPartBlendModel(SplatfactoModel):
 
         # Base object poses (map mot view to ref view): T_obj = C_ref @ inv(C_mot)
         T_obj_base = C_ref @ T_mot_inv
-        if "time_indices" in self.metadata:
+        if self.config.joint_aware:
+            if "joint_aware_object_poses" not in self.metadata or "time_indices" not in self.metadata:
+                raise ValueError("joint-aware blending needs authority object poses and time indices from the dataparser")
+            exact = torch.as_tensor(self.metadata["joint_aware_object_poses"], dtype=T_obj_base.dtype, device=device)
+            ti = self.metadata["time_indices"]
+            err = float((T_obj_base - exact[ti]).abs().max())
+            if err > 1e-4:
+                raise ValueError(f"training cameras imply object poses that differ from the authority (max {err:.2e})")
+            T_obj_base = exact
+        elif "time_indices" in self.metadata:
             time_indices = self.metadata["time_indices"]
             representatives = [time_indices.index(t) for t in range(max(time_indices) + 1)]
             shared = T_obj_base[representatives]

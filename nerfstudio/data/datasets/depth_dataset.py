@@ -103,9 +103,18 @@ class DepthDataset(InputDataset):
         self.depth_filenames = self.metadata["depth_filenames"]
         self.depth_unit_scale_factor = self.metadata["depth_unit_scale_factor"]
 
+    def _joint_aware_supervision(self, data: Dict) -> Dict:
+        """ForceArtGS joint-aware mode: per-image silhouette-validity mask (True = pixel may supervise alpha)."""
+        names = self.metadata.get("supervision_filenames")
+        if not names:
+            return {}
+        from nerfstudio.data.utils.data_utils import get_image_mask_tensor_from_path
+        mask = get_image_mask_tensor_from_path(names[data["image_idx"]], scale_factor=self.scale_factor)
+        return {"supervision_valid": mask}
+
     def get_metadata(self, data: Dict) -> Dict:
         if self.depth_filenames is None:
-            return {"depth_image": self.depths[data["image_idx"]]}
+            return {"depth_image": self.depths[data["image_idx"]], **self._joint_aware_supervision(data)}
 
         filepath = self.depth_filenames[data["image_idx"]]
         height = int(self._dataparser_outputs.cameras.height[data["image_idx"]])
@@ -117,7 +126,7 @@ class DepthDataset(InputDataset):
             filepath=filepath, height=height, width=width, scale_factor=scale_factor
         )
 
-        return {"depth_image": depth_image}
+        return {"depth_image": depth_image, **self._joint_aware_supervision(data)}
 
     def _find_transform(self, image_path: Path) -> Union[Path, None]:
         while image_path.parent != image_path:

@@ -147,6 +147,9 @@ class SplatfactoModelConfig(ModelConfig):
     """weight of ssim loss"""
     fg_mask_lambda: float = 1.0
     """weight of mask loss"""
+    joint_aware_supervision: bool = False
+    """ForceArtGS joint-aware part training: positives supervise RGB/depth/alpha, only verified absence supervises
+    alpha=0, unknown/other-part/robot pixels give zero gradient (needs batch['supervision_valid'])."""
     sensor_depth_lambda: float = 1.0
     """weight of sensor depth loss"""
     stop_split_at: int = 30000
@@ -904,6 +907,9 @@ class SplatfactoModel(Model):
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["rgb"]
 
+        if self.config.joint_aware_supervision:
+            return self._joint_aware_loss_dict(outputs, batch, gt_img, pred_img)
+
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
         if "mask" in batch:
@@ -952,6 +958,32 @@ class SplatfactoModel(Model):
                     pred_depth = pred_depth * mask
                 loss_dict["sensor_depth_loss"] = nn.L1Loss()(pred_depth, depth_image) * self.config.sensor_depth_lambda
         return loss_dict
+
+    def _joint_aware_loss_dict(self, outputs, batch, gt_img, pred_img) -> Dict[str, torch.Tensor]:
+        from nerfstudio.models.joint_aware_losses import joint_aware_part_losses
+        if "mask" not in batch or "supervision_valid" not in batch:
+            raise RuntimeError("joint_aware_supervision needs part masks and supervision_valid masks in every batch")
+        pos = self._downscale_if_required(batch["mask"].float()).to(self.device) > 0.5
+        sil = self._downscale_if_required(batch["supervision_valid"].float()).to(self.device) > 0.5
+        assert pos.shape[:2] == sil.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
+        depth_gt = depth_pred = None
+        if "depth_image" in batch and self.config.output_depth_during_training:
+            depth_gt = self._downscale_if_required(batch["depth_image"]).to(self.device)
+            depth_pred = outputs["depth"]
+        losses = joint_aware_part_losses(pred_img, gt_img, outputs["accumulation"], pos, sil, depth_pred, depth_gt,
+                                         ssim_fn=self.ssim, ssim_lambda=self.config.ssim_lambda,
+                                         mask_lambda=self.config.fg_mask_lambda if self.config.enable_mask_loss else 0.0,
+                                         depth_lambda=self.config.sensor_depth_lambda)
+        losses.pop("_support_pixels")
+        scale_reg = torch.tensor(0.0, device=self.device)
+        if self.config.use_scale_regularization and self.step % 10 == 0:   # same regulariser as the legacy path
+            scale_exp = torch.exp(self.scales)
+            scale_reg = (torch.maximum(scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1),
+                                       torch.tensor(self.config.max_gauss_ratio)) - self.config.max_gauss_ratio).mean()
+        losses["scale_reg"] = scale_reg
+        if self.training:
+            self.camera_optimizer.get_loss_dict(losses)
+        return losses
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:

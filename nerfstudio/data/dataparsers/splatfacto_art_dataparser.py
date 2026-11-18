@@ -59,6 +59,9 @@ class SplatfactoArtDataParserConfig(DataParserConfig):
     """Whether to automatically scale the poses to fit in +/- 1 bounding box."""
     
     scale_factor: float = 1.0
+    joint_aware: bool = False
+    """ForceArtGS joint-aware mode: estimated_joint.json must be the adapter derived from a validated authority
+    (checked against JOINT_AWARE_AUTHORITY.json), q covers the full frame map, and no world normalisation."""
     """How much to scale the camera origins by."""
 
 
@@ -103,8 +106,26 @@ class SplatfactoArtDataParser(DataParser):
         joint_origin = np.asarray(est["origin"], dtype=np.float32)
         rotation_offset = np.asarray(est["global_transform"], dtype=np.float32)
         joint_params = [float(x) for x in est.get("joint_params", [])]
+        if self.config.joint_aware:
+            import hashlib
+            marker_path = blend_dir / "JOINT_AWARE_AUTHORITY.json"
+            if not marker_path.exists():
+                raise RuntimeError(f"joint-aware art training needs {marker_path} (no legacy estimated_joint.json)")
+            marker = json.loads(marker_path.read_text())
+            if hashlib.sha256(est_path.read_bytes()).hexdigest() != marker["estimated_joint_sha256"]:
+                raise RuntimeError("estimated_joint.json differs from the adapter derived from the authority")
+            if est.get("authority_id") != marker["authority_id"]:
+                raise RuntimeError("estimated_joint.json authority id mismatch")
+            if (self.config.orientation_method != "none" or self.config.center_poses or self.config.auto_scale_poses
+                    or self.config.scale_factor != 1.0):
+                raise RuntimeError("joint-aware mode requires orientation none, no centring, no auto scale, scale 1")
+            n_times = int(marker["num_timestamps"])
+            if len(joint_params) != n_times:
+                raise RuntimeError(f"q has {len(joint_params)} entries, frame map has {n_times}")
+            if view_frames is not None and max(fr["time_index"] for fr in view_frames) >= n_times:
+                raise RuntimeError("a training row has a time index outside the authority frame map")
         # Verify camera and joint params counts match (if provided)
-        if len(joint_params) > 0:
+        if len(joint_params) > 0 and not self.config.joint_aware:
             expected = max(fr["time_index"] for fr in view_frames) + 1 if view_frames is not None else len(cam_all)
             assert expected == len(joint_params), \
                 f"Timestamps ({expected}) != joint_params ({len(joint_params)})"
