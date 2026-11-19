@@ -57,6 +57,9 @@ class SplatfactoArtModelConfig(SplatfactoModelConfig):
     
     # Part weight optimization
     trainable_weights: bool = True
+    hard_part_ids: bool = False
+    """Discrete part ids in the final phase: initial blend weights are snapped to the two-part argmax (w >= 0.5 ->
+    moving) and FROZEN; densified/cloned Gaussians inherit their parent's id (re-frozen after every refinement)."""
     """Optimize per-point part weights (sigmoid in [0,1])"""
     
     # Joint parameter optimization
@@ -159,11 +162,14 @@ class SplatfactoArtModel(SplatfactoModel):
         """Initialize per-point part weights from metadata"""
         pw_init = self.metadata["part_weights"].to(device)
         # Ensure shape [N]
-        pw_init = pw_init.view(-1).clamp(1e-4, 1 - 1e-4)
+        pw_init = pw_init.view(-1)
+        if self.config.hard_part_ids:
+            pw_init = (pw_init >= 0.5).float()          # argmax of the two-part softmax -> discrete part id
+        pw_init = pw_init.clamp(1e-4, 1 - 1e-4)
         logits_init = torch.log(pw_init / (1.0 - pw_init)).view(-1, 1)
         self.gauss_params["part_weights"] = Parameter(
-            logits_init, 
-            requires_grad=self.config.trainable_weights
+            logits_init,
+            requires_grad=self.config.trainable_weights and not self.config.hard_part_ids
         )
         
         # self.part_threshold = float(self.metadata.get("part_threshold", 0.5))
@@ -733,3 +739,7 @@ class SplatfactoArtModel(SplatfactoModel):
             # match current number of points
             self.max_2Dsize = torch.zeros(self.num_points, device=self.device, dtype=torch.float32)
         super().refinement_after(optimizers, step)
+        # densify/cull rebuild every gauss param as a new nn.Parameter (requires_grad=True by default): keep frozen
+        # part ids frozen, so clones/splits keep the id copied from their parent
+        if "part_weights" in self.gauss_params and (self.config.hard_part_ids or not self.config.trainable_weights):
+            self.gauss_params["part_weights"].requires_grad_(False)
