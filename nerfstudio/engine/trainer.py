@@ -432,6 +432,26 @@ class Trainer:
             avg_over_steps=True,
         )
 
+    def _rebind_optimizer_params(self) -> None:
+        """Point every optimizer (and its loaded Adam state) at the model's live parameters after a checkpoint load.
+
+        Gaussian models (splatfacto and subclasses) replace their Parameter objects in load_state_dict because the
+        number of Gaussians differs from the seed cloud, while the optimizers were built from the old objects. Without
+        this, a resumed run steps tensors the model no longer uses: splatfacto stops learning until its next
+        densification, and twopart-blend (densification off) never learns again.
+        """
+        for name, params in self.pipeline.get_param_groups().items():
+            opt = self.optimizers.optimizers.get(name)
+            if opt is None:
+                continue
+            new = list(params)
+            old = opt.param_groups[0]["params"]
+            for o, n in zip(old, new):
+                if o is not n and o in opt.state:
+                    opt.state[n] = opt.state.pop(o)
+            opt.param_groups[0]["params"] = new
+            self.optimizers.parameters[name] = new
+
     def _load_checkpoint(self) -> None:
         """Helper function to load pipeline and optimizer from prespecified checkpoint"""
         load_dir = self.config.load_dir
@@ -452,7 +472,8 @@ class Trainer:
             if "schedulers" in loaded_state and self.config.load_scheduler:
                 self.optimizers.load_schedulers(loaded_state["schedulers"])
             self.grad_scaler.load_state_dict(loaded_state["scalers"])
-            
+            self._rebind_optimizer_params()
+
             # Load frame filtering state if available
             if self.config.enable_frame_filtering and "filtered_train_indices" in loaded_state:
                 self.filtered_train_indices = loaded_state["filtered_train_indices"]
@@ -477,7 +498,8 @@ class Trainer:
             if "schedulers" in loaded_state and self.config.load_scheduler:
                 self.optimizers.load_schedulers(loaded_state["schedulers"])
             self.grad_scaler.load_state_dict(loaded_state["scalers"])
-            
+            self._rebind_optimizer_params()
+
             # Load frame filtering state if available
             if self.config.enable_frame_filtering and "filtered_train_indices" in loaded_state:
                 self.filtered_train_indices = loaded_state["filtered_train_indices"]

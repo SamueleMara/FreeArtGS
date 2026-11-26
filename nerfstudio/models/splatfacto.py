@@ -325,7 +325,9 @@ class SplatfactoModel(Model):
         for name, param in self.gauss_params.items():
             old_shape = param.shape
             new_shape = (newp,) + old_shape[1:]
-            self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device))
+            # keep frozen params frozen (e.g. hard part ids) when a checkpoint is loaded to resume training
+            self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device),
+                                                         requires_grad=param.requires_grad)
         super().load_state_dict(dict, **kwargs)
 
     def k_nearest_sklearn(self, x: torch.Tensor, k: int):
