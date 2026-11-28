@@ -108,6 +108,9 @@ def eval_setup(
     # load checkpoints from wherever they were saved
     # TODO: expose the ability to choose an arbitrary checkpoint
     config.load_dir = config.get_checkpoint_dir()
+    # evaluate / export the RESULT of this run (its latest checkpoint): a load_step in the saved training config is the
+    # step a resumed training started from, and that checkpoint may no longer exist (save_only_latest_checkpoint)
+    config.load_step = None
 
     # setup pipeline (which includes the DataManager)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
